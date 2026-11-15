@@ -70,12 +70,32 @@ PROJECT ZORO is engineered as an autonomous personal intelligence designed to ru
 - **Concurrency Solution**: SQLite cannot process concurrent write transactions without locking errors. All write operations are routed through a dedicated single-worker async queue.
 - **Transactions**: Atomic execution within `BEGIN IMMEDIATE ... COMMIT` blocks.
 - **Read Scalability**: Independent read-only connections allow queries to execute in parallel without blocking writes.
-- **Audit Logging**: Each audit entry includes `HMAC-SHA256(prev_hash || timestamp || action || details, key)`. Any manual database alteration invalidates subsequent hashes.
+- **Cryptographic Audit Logging (`zoro.security.audit`)**:
+  - Each audit entry calculates `HMAC-SHA256(prev_hash || timestamp || actor || action || resource || details_json, key)`.
+  - Sequential hash chaining links every record back to the genesis block (`00000000`).
+- **Trusted External Audit Checkpoint**:
+  - Eliminates the vulnerability where deleting the trailing records of an SQLite audit log could go undetected.
+  - An independent checkpoint file (`data/security/audit.checkpoint`) stores `last_sequence_id`, `last_record_hash`, and a DPAPI-HMAC seal.
+  - Updates are committed atomically via temporary file writes, `os.fsync`, and atomic `os.replace`.
+  - `verify_integrity()` validates both internal DB continuity and external checkpoint consistency; truncation or checkpoint tampering fails closed.
 
 ### 3.4 OS Security & Emergency Controller (`zoro.security`)
-- **Process Isolation**: All ZORO processes belong to a kernel-managed Windows Job Object.
-- **Hard Kill Switch**: An external script/shortcut executes `TerminateJobObject`, killing the entire process tree unconditionally.
-- **Halt State Immutability**: The halt file is placed in `%PROGRAMDATA%\Zoro\Security\halt.lock`. Windows DACLs (`icacls`) explicitly deny write and delete privileges to the interactive user, preventing agent self-modification.
+- **Process Isolation via Win32 Job Object**:
+  - All ZORO processes (supervisor, engine, UI, worker subprocesses) are assigned to `WindowsJobObject` (`Local\ZoroJobObject`).
+  - Created with NULL security attributes; kernel query confirms `HANDLE_FLAG_INHERIT == 0` (non-inheritable).
+  - Configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000` and zero breakaway flags (`JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0`, `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0`).
+  - Child processes cannot breakaway, inherit job handles, or remove themselves from the job.
+  - If the supervisor process crashes or closes its handle, the Windows NT kernel immediately terminates all descendant processes.
+- **Hard Kill Switch**:
+  - Standalone controller `scripts/emergency_kill.py` executes `TerminateJobObject`, atomically terminating the process tree with exit code 137.
+  - Fallback process tree termination uses `taskkill /F /T /PID`.
+- **Halt State Immutability & Resumption**:
+  - The halt file is placed in `%PROGRAMDATA%\Zoro\Security\halt.lock` (or repository data directory).
+  - Preflight checks in `ZoroEngine` and `zoro.__main__` abort initialization if `halt.lock` exists.
+  - Resumption requires running `scripts/emergency_kill.py --resume` or `scripts/resume_zoro.bat`.
+- **DPAPI Credential Storage**:
+  - HMAC keys are protected at rest via Windows Data Protection API (`CryptProtectData`).
+  - Decryption failure raises `RuntimeError` and refuses key overwrite, preserving historical audit records.
 
 ### 3.5 Model Abstraction Layer (`zoro.models`)
 - `BaseModelProvider` decouples the system from specific model formats.

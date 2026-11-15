@@ -97,13 +97,28 @@ class AuditKeyManager:
             self.key_path = default_paths.security_dir / "audit.key"
 
     def get_or_create_key(self) -> bytes:
-        """Retrieve existing DPAPI-decrypted key, or generate and store a new 32-byte key."""
+        """Retrieve existing DPAPI-decrypted key, or generate and store a new 32-byte key.
+        
+        Fail-Closed Invariant:
+        If key_path exists but cannot be decrypted, this method MUST raise RuntimeError
+        and refuse to overwrite the key file to prevent silent invalidation of historical
+        audit trails and checkpoints.
+        """
         if self.key_path.exists():
             try:
                 encrypted_bytes = self.key_path.read_bytes()
                 return dpapi_unprotect(encrypted_bytes)
             except Exception as e:
-                logger.warning("Failed to decrypt existing DPAPI audit key (%s). Generating new key.", e)
+                logger.critical(
+                    "Security Alert: Failed to decrypt existing DPAPI audit key at %s: %s. "
+                    "Refusing to generate replacement key to prevent historical audit invalidation.",
+                    self.key_path,
+                    e,
+                )
+                raise RuntimeError(
+                    f"CRITICAL: Failed to decrypt existing DPAPI audit key at {self.key_path}: {e}. "
+                    "System fails closed to protect audit trail integrity."
+                ) from e
 
         # Generate a fresh 32-byte cryptographically secure random key
         raw_key = secrets.token_bytes(32)
@@ -113,6 +128,7 @@ class AuditKeyManager:
             self.key_path.write_bytes(encrypted)
             logger.info("Generated new DPAPI-protected audit key at %s", self.key_path)
         except Exception as e:
-            logger.error("Failed to write DPAPI audit key: %s. Using in-memory key.", e)
+            logger.critical("Failed to write DPAPI audit key to %s: %s", self.key_path, e)
+            raise RuntimeError(f"Failed to persist DPAPI audit key: {e}") from e
 
         return raw_key

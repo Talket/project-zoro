@@ -31,6 +31,7 @@ def test_settings(temp_dir):
         security_dir=temp_dir / "security",
         halt_lock_path=temp_dir / "security" / "halt.lock",
         pid_path=temp_dir / "zoro.pid",
+        audit_checkpoint_path=temp_dir / "security" / "audit.checkpoint",
         pipe_name=rf"\\.\pipe\zoro-test-{pipe_id}",
         audit_hmac_key="test-secret-key-12345",
         telemetry_interval_sec=0.1,

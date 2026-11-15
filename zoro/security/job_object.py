@@ -12,10 +12,13 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Windows Constants
-JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
 JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x00001000
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+JobObjectBasicAccountingInformation = 1
 JobObjectExtendedLimitInformation = 9
 PROCESS_ALL_ACCESS = 0x1F0FFF
+HANDLE_FLAG_INHERIT = 0x00000001
 
 
 class IO_COUNTERS(ctypes.Structure):
@@ -51,6 +54,19 @@ class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
         ("JobMemoryLimit", ctypes.c_size_t),
         ("PeakProcessMemoryUsed", ctypes.c_size_t),
         ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+class JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("TotalUserTime", ctypes.c_int64),
+        ("TotalKernelTime", ctypes.c_int64),
+        ("ThisPeriodTotalUserTime", ctypes.c_int64),
+        ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+        ("TotalPageFaultCount", wintypes.DWORD),
+        ("TotalProcesses", wintypes.DWORD),
+        ("ActiveProcesses", wintypes.DWORD),
+        ("TotalTerminatedProcesses", wintypes.DWORD),
     ]
 
 
@@ -167,6 +183,60 @@ class WindowsJobObject:
             return False
         logger.warning("Job Object terminated all processes with exit code %d.", exit_code)
         return True
+
+    def query_limit_flags(self) -> Optional[int]:
+        """Query kernel LimitFlags configured on this Job Object."""
+        if not self._is_windows or not self.handle:
+            return None
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        success = kernel32.QueryInformationJobObject(
+            self.handle,
+            JobObjectExtendedLimitInformation,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            None,
+        )
+        if not success:
+            err = ctypes.get_last_error()
+            logger.error("Failed to query Job Object limit information: error %d", err)
+            return None
+        return int(info.BasicLimitInformation.LimitFlags)
+
+    def is_handle_inheritable(self) -> bool:
+        """Query whether the Job Object handle has the HANDLE_FLAG_INHERIT flag set."""
+        if not self._is_windows or not self.handle:
+            return False
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        flags = wintypes.DWORD()
+        success = kernel32.GetHandleInformation(self.handle, ctypes.byref(flags))
+        if not success:
+            err = ctypes.get_last_error()
+            logger.error("Failed to get handle information: error %d", err)
+            return False
+        return bool(flags.value & HANDLE_FLAG_INHERIT)
+
+    def query_active_process_count(self) -> int:
+        """Query the number of currently active processes in the Job Object."""
+        if not self._is_windows or not self.handle:
+            return 0
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        acc = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION()
+        success = kernel32.QueryInformationJobObject(
+            self.handle,
+            JobObjectBasicAccountingInformation,
+            ctypes.byref(acc),
+            ctypes.sizeof(acc),
+            None,
+        )
+        if not success:
+            err = ctypes.get_last_error()
+            logger.error("Failed to query Job Object accounting information: error %d", err)
+            return 0
+        return int(acc.ActiveProcesses)
 
     def close(self) -> None:
         """Close the Job Object handle."""

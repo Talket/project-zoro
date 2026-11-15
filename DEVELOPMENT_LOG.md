@@ -41,7 +41,34 @@
 
 ---
 
-## Session 2: Milestone 1 Independent Audit, Deep Repairs, and Rigorous Verification
+## Session 3: Milestone 1 Final Security Hardening & Acceptance
+
+### Timestamp: 2026-11-15 22:20 IST
+- **Objective**: Execute final security hardening for Milestone 1 acceptance, addressing four specific review findings without advancing to Milestone 2.
+- **Security Hardening & Technical Solutions**:
+  1. *Audit Log Tail-Deletion Protection*:
+     - Problem: Sequential IDs and hash chaining alone cannot detect deletion of trailing audit records if the remaining prefix records form a valid sequential chain.
+     - Solution: Implemented trusted external audit checkpoint (`data/security/audit.checkpoint`). The checkpoint stores `last_sequence_id`, `last_record_hash`, and a DPAPI HMAC-SHA256 signature. Writes use `tempfile` + `os.fsync` + `os.replace` to guarantee atomic state commits. `verify_integrity()` validates internal DB hash continuity, checkpoint signature validity, and sequence ID consistency. Fails closed immediately on tail or middle deletions.
+  2. *DPAPI Key Lifecycle & Fail-Closed Protection*:
+     - Problem: `AuditKeyManager` caught decryption exceptions and silently generated a new key, overwriting `audit.key` and permanently breaking historical audit verification.
+     - Solution: Refactored `AuditKeyManager.get_or_create_key()`. If `audit.key` exists and cannot be decrypted, it raises `RuntimeError` and refuses key overwrite. Removed fallback plaintext HMAC keys from settings. Documented DPAPI's threat model in `SECURITY.md` (protects at rest, does NOT isolate from same-user processes).
+  3. *Job Object Kernel Limits & Handle Non-Inheritance*:
+     - Added Win32 kernel limit query inspection methods (`query_limit_flags()`, `is_handle_inheritable()`, `query_active_process_count()`) via `QueryInformationJobObject` and `GetHandleInformation`.
+     - Verified `HANDLE_FLAG_INHERIT == 0` (non-inheritable).
+     - Verified `LimitFlags` contain `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (0x2000)`.
+     - Verified breakaway flags (`0x800`, `0x1000`) are 0.
+     - Implemented and verified all 7 live Windows NT emergency failure scenarios in `tests/test_emergency_scenarios.py`:
+       - Scenario 1: Normal emergency shutdown with child process termination and halt persistence.
+       - Scenario 2: Supervisor crash (parent killed $\to$ Job Object terminates core via `KILL_ON_JOB_CLOSE`).
+       - Scenario 3: Core crash (core crashes or exits $\to$ supervisor detects and handles).
+       - Scenario 4: Child process containment (child spawns grandchild $\to$ all contained and killed).
+       - Scenario 5: Handle inheritance rejection (`HANDLE_FLAG_INHERIT == 0`, raw handle access returns `ERROR_INVALID_HANDLE`).
+       - Scenario 6: Halt lock persistence (startup blocked while halted, resume clears lock).
+       - Scenario 7: Repeated cycle (boot $\to$ emergency kill $\to$ resume $\to$ boot 10x consecutively).
+  4. *Test Suite Reconciled & Strengthened*:
+     - Removed redundant scratch module `tests/test_engine_and_ipc.py` and consolidated tests into single-responsibility modules.
+     - Test suite now consists of **16 modules**, **70 automated tests**, **85% line coverage**, passing in **8.16s** on the Windows 11 host.
+- **Milestone 1 Final Acceptance Status**: COMPLETE. Ready for Milestone 2 transition.
 
 ### Timestamp: 2026-11-15 19:30 IST
 - **Objective**: Independently audit, repair, stress test, and formally verify PROJECT ZORO Milestone 1 without advancing to Milestone 2.

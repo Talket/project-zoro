@@ -39,6 +39,7 @@ class AppPaths:
         self.db_path: Path = self.data_dir / "zoro.db"
         self.halt_lock_path: Path = self.security_dir / "halt.lock"
         self.pid_path: Path = self.data_dir / "zoro.pid"
+        self.audit_checkpoint_path: Path = self.security_dir / "audit.checkpoint"
         self.ipc_pipe_name: str = os.environ.get("ZORO_PIPE_NAME", r"\\.\pipe\zoro-ipc-main")
 
     def ensure_directories(self) -> None:
@@ -53,6 +54,7 @@ class AppPaths:
             fallback_sec.mkdir(parents=True, exist_ok=True)
             self.security_dir = fallback_sec
             self.halt_lock_path = self.security_dir / "halt.lock"
+            self.audit_checkpoint_path = self.security_dir / "audit.checkpoint"
 
 
 # Global singleton instance

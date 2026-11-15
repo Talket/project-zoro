@@ -17,20 +17,24 @@ This document outlines the phased engineering milestones for PROJECT ZORO. Progr
 
 ## Milestone 1: Core Foundation & Desktop Shell
 - [x] Virtual environment initialization with verified dependencies.
-- [x] Complete documentation suite.
+- [x] Complete documentation suite (`README.md`, `ARCHITECTURE.md`, `SECURITY.md`, `CONFIGURATION.md`, `TESTING.md`, `DEVELOPMENT_LOG.md`).
 - [x] Pydantic v2 configuration management (`zoro.config.settings`).
 - [x] SQLite WAL storage with serialized write actor and migrations (`zoro.storage`).
 - [x] Cryptographically chained HMAC-SHA256 audit logging (`zoro.security.audit`).
-- [x] Windows Job Object process tree isolation (`zoro.security.job_object`).
+- [x] External HMAC-signed audit checkpoint (`audit.checkpoint`) with tail-deletion and truncation detection.
+- [x] Windows DPAPI fail-closed key management with documented same-user threat boundaries.
+- [x] Windows Job Object process tree isolation (`zoro.security.job_object`) with kernel `KILL_ON_JOB_CLOSE` and zero breakaway.
+- [x] Handle non-inheritance verification (`HANDLE_FLAG_INHERIT == 0`).
+- [x] 7 live Windows NT failure and emergency shutdown scenarios automated and verified.
 - [x] OS-enforced Emergency Halt controller and DACL protection (`zoro.security.emergency`).
 - [x] Direct NVML GPU/VRAM telemetry sampler (`zoro.core.nvml_telemetry`).
 - [x] Dynamic hardware resource governor (`zoro.core.governor`).
-- [x] Windows Named Pipe IPC server and client (`zoro.ipc`).
+- [x] Windows Named Pipe IPC server and client with Overlapped I/O (`zoro.ipc`).
 - [x] Central Engine lifecycle FSM & event bus (`zoro.core`).
 - [x] PySide6 Desktop HUD & System Tray Shell (`zoro.ui`).
-- [x] Automated pytest suite (25/25 tests passing).
-- [x] Live verification of emergency shutdown, normal launch, and IPC resilience.
-- **Status**: **COMPLETED**
+- [x] Automated pytest suite: **70/70 tests passing** across **16 modules** with **85% line coverage**.
+- [x] Empirical memory benchmarking: Core Engine RSS 36.5 MB, Full Stack RSS 70.9 MB.
+- **Status**: **FINAL ACCEPTANCE COMPLETED**
 
 ---
 

@@ -61,3 +61,55 @@ def test_terminate_named_job_from_external_caller():
                 child.wait()
 
     job.close()
+
+
+def test_job_object_kernel_limits_and_non_inheritance():
+    """Verify kernel LimitFlags (KILL_ON_JOB_CLOSE, zero breakaway) and HANDLE_FLAG_INHERIT=0."""
+    job_name = "Local\\ZoroTestKernelLimits"
+    job = WindowsJobObject(name=job_name)
+    assert job.create() is True
+
+    try:
+        if os.name == "nt":
+            # 1. Handle inheritance must be FALSE (0)
+            assert job.is_handle_inheritable() is False
+
+            # 2. LimitFlags must include KILL_ON_JOB_CLOSE (0x2000)
+            flags = job.query_limit_flags()
+            assert flags is not None
+            assert flags & 0x00002000 == 0x00002000
+
+            # 3. Breakaway flags must NOT be set (prevent escape)
+            assert flags & 0x00000800 == 0  # JOB_OBJECT_LIMIT_BREAKAWAY_OK
+            assert flags & 0x00001000 == 0  # JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK
+    finally:
+        job.close()
+
+
+def test_job_object_active_process_accounting():
+    """Verify active process accounting tracks processes assigned and terminated."""
+    job_name = "Local\\ZoroTestAccountingUnit"
+    job = WindowsJobObject(name=job_name)
+    assert job.create() is True
+
+    try:
+        if os.name == "nt":
+            initial_count = job.query_active_process_count()
+            assert initial_count == 0
+
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            try:
+                assigned = job.assign_process(child.pid)
+                assert assigned is True
+                assert job.query_active_process_count() >= 1
+
+                job.terminate_all(exit_code=137)
+                time.sleep(0.2)
+                assert job.query_active_process_count() == 0
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+    finally:
+        job.close()
+

@@ -1,8 +1,10 @@
-"""Comprehensive tests for HMAC-SHA256 chained audit logging and DPAPI key management."""
+"""Comprehensive tests for HMAC-SHA256 chained audit logging, trusted checkpoints, and DPAPI key management."""
 
+import json
 import pytest
 from zoro.security.audit import AuditLogger, GENESIS_HASH
 from zoro.security.dpapi import AuditKeyManager, dpapi_protect, dpapi_unprotect
+from zoro.storage.db import DatabaseManager
 
 
 def test_dpapi_protect_and_unprotect_roundtrip():
@@ -28,6 +30,19 @@ def test_audit_key_manager_persistence(temp_dir):
     assert key2 == key1
 
 
+def test_audit_key_manager_fails_closed_on_corrupt_key(temp_dir):
+    """Verify AuditKeyManager fails closed when key file exists but cannot be decrypted."""
+    key_file = temp_dir / "audit.key"
+    key_file.write_bytes(b"corrupted_non_dpapi_bytes_1234567890")
+
+    mgr = AuditKeyManager(key_path=key_file)
+    with pytest.raises(RuntimeError) as exc_info:
+        mgr.get_or_create_key()
+    assert "Failed to decrypt existing DPAPI audit key" in str(exc_info.value)
+    # Ensure key file was NOT overwritten with a newly generated key
+    assert key_file.read_bytes() == b"corrupted_non_dpapi_bytes_1234567890"
+
+
 @pytest.mark.asyncio
 async def test_audit_hash_chaining(test_db, test_settings, temp_dir):
     """Valid chain verification and record linkage."""
@@ -48,7 +63,7 @@ async def test_audit_hash_chaining(test_db, test_settings, temp_dir):
 
 
 @pytest.mark.asyncio
-async def test_audit_modified_entry_detection(test_db, test_settings, temp_dir):
+async def test_audit_modified_entry_detection(test_db, test_settings):
     """Detection of modified audit entry."""
     key = b"test_key_1234567890123456789012"
     audit = AuditLogger(test_db, settings=test_settings, key=key)
@@ -69,8 +84,8 @@ async def test_audit_modified_entry_detection(test_db, test_settings, temp_dir):
 
 
 @pytest.mark.asyncio
-async def test_audit_deleted_entry_detection(test_db, test_settings, temp_dir):
-    """Detection of deleted audit entries (middle and tail)."""
+async def test_audit_deleted_entry_detection(test_db, test_settings):
+    """Detection of deleted audit entries (middle deletion)."""
     key = b"test_key_1234567890123456789012"
     audit = AuditLogger(test_db, settings=test_settings, key=key)
 
@@ -88,34 +103,96 @@ async def test_audit_deleted_entry_detection(test_db, test_settings, temp_dir):
 
 
 @pytest.mark.asyncio
-async def test_audit_reordered_entry_detection(test_db, test_settings):
-    """Detection of reordered audit entries."""
+async def test_audit_tail_deletion_detection_single_and_multiple(test_db, test_settings):
+    """
+    Scenario: Verification of 10 audit records, followed by single tail deletion,
+    and multiple tail deletions.
+    """
     key = b"test_key_1234567890123456789012"
     audit = AuditLogger(test_db, settings=test_settings, key=key)
 
-    rec1 = await audit.log_event("User", "ACTION_1", "res1", {})
-    rec2 = await audit.log_event("User", "ACTION_2", "res2", {})
+    # 1. Create 10 audit records
+    for i in range(1, 11):
+        await audit.log_event("System", f"ACTION_{i}", f"resource_{i}", {"step": i})
 
-    # Swap record 1 and record 2 actions/hashes
-    await test_db.execute_write("UPDATE audit_records SET id = 99 WHERE id = 1")
-    await test_db.execute_write("UPDATE audit_records SET id = 1 WHERE id = 2")
-    await test_db.execute_write("UPDATE audit_records SET id = 2 WHERE id = 99")
+    # 2. Verify complete chain (10 records)
+    is_valid, err_id = await audit.verify_integrity()
+    assert is_valid is True
+    assert err_id is None
 
-    is_valid, corrupted_id = await audit.verify_integrity()
+    # 3. Delete single final record (record 10)
+    await test_db.execute_write("DELETE FROM audit_records WHERE id = 10")
+    is_valid, err_id = await audit.verify_integrity()
+    assert is_valid is False
+    assert err_id == 10  # Checkpoint expects ID 10, database ends at ID 9
+
+    # 4. Delete multiple final records (delete records 8, 9)
+    await test_db.execute_write("DELETE FROM audit_records WHERE id >= 8")
+    is_valid, err_id = await audit.verify_integrity()
+    assert is_valid is False
+    assert err_id == 10  # Checkpoint still expects ID 10
+
+
+@pytest.mark.asyncio
+async def test_audit_checkpoint_tampering_detection(test_db, test_settings):
+    """Detection when external checkpoint file is tampered with or modified."""
+    key = b"test_key_1234567890123456789012"
+    audit = AuditLogger(test_db, settings=test_settings, key=key)
+
+    for i in range(1, 4):
+        await audit.log_event("User", f"ACTION_{i}", "res", {})
+
+    assert (await audit.verify_integrity())[0] is True
+
+    # Tamper with checkpoint JSON content (alter sequence ID without valid HMAC)
+    cp_path = audit.checkpoint_path
+    cp_data = json.loads(cp_path.read_text(encoding="utf-8"))
+    cp_data["last_sequence_id"] = 99
+    cp_path.write_text(json.dumps(cp_data), encoding="utf-8")
+
+    is_valid, err_id = await audit.verify_integrity()
+    assert is_valid is False
+    assert err_id is None
+
+
+@pytest.mark.asyncio
+async def test_audit_checkpoint_interrupted_write_detection(test_db, test_settings):
+    """Detection when checkpoint file is empty or corrupted due to an interrupted write."""
+    key = b"test_key_1234567890123456789012"
+    audit = AuditLogger(test_db, settings=test_settings, key=key)
+
+    await audit.log_event("User", "ACTION_1", "res", {})
+    assert (await audit.verify_integrity())[0] is True
+
+    # Simulate zero-byte interrupted write
+    audit.checkpoint_path.write_bytes(b"")
+
+    is_valid, err_id = await audit.verify_integrity()
     assert is_valid is False
 
 
 @pytest.mark.asyncio
-async def test_audit_invalid_hmac_detection(test_db, test_settings):
-    """Detection when a record has an invalid HMAC signature."""
+async def test_audit_checkpoint_persistence_across_restart(temp_dir, test_settings):
+    """Verify that restarting ZORO preserves and validates the checkpoint seamlessly."""
+    db_path = temp_dir / "audit_persist.db"
+    db1 = DatabaseManager(db_path=db_path, settings=test_settings)
+    await db1.initialize()
+
     key = b"test_key_1234567890123456789012"
-    audit = AuditLogger(test_db, settings=test_settings, key=key)
+    audit1 = AuditLogger(db1, settings=test_settings, key=key)
 
-    rec1 = await audit.log_event("User", "ACTION_1", "res1", {})
+    for i in range(1, 6):
+        await audit1.log_event("User", f"STEP_{i}", "res", {})
 
-    # Tamper with record_hash
-    await test_db.execute_write("UPDATE audit_records SET record_hash = 'badhash0000000000000000000000000000000000000000000000000000000000' WHERE id = 1")
+    assert (await audit1.verify_integrity())[0] is True
+    await db1.close()
 
-    is_valid, corrupted_id = await audit.verify_integrity()
-    assert is_valid is False
-    assert corrupted_id == 1
+    # Reopen in new database and audit instances
+    db2 = DatabaseManager(db_path=db_path, settings=test_settings)
+    await db2.initialize()
+    audit2 = AuditLogger(db2, settings=test_settings, key=key)
+
+    is_valid, err_id = await audit2.verify_integrity()
+    assert is_valid is True
+    assert err_id is None
+    await db2.close()

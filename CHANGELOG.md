@@ -4,6 +4,29 @@ All notable changes to PROJECT ZORO are documented in this file in reverse chron
 
 ---
 
+## [0.1.2] - 2026-11-15 (Milestone 1 Final Security Hardening & Acceptance)
+
+### Fixed
+- **Audit Log Tail-Deletion Vulnerability**: Solved the tail-truncation vulnerability where deleting trailing SQLite audit records went undetected. Added trusted, external HMAC-signed checkpoint (`data/security/audit.checkpoint`) committed atomically with `os.fsync` + `os.replace`. `verify_integrity()` now fails closed on tail deletion, middle deletion, record alteration, or checkpoint tampering.
+- **DPAPI Key Overwrite Vulnerability**: Refactored `AuditKeyManager.get_or_create_key()` to raise `RuntimeError` and log a critical security event if `audit.key` exists but fails decryption, strictly refusing to overwrite the key or silently invalidate historical audit logs.
+- **Settings Plaintext Key Deprecation**: Removed hardcoded HMAC keys from default settings; configured `audit_hmac_key: Optional[str] = None` with deprecation note, ensuring DPAPI is the sole key source.
+- **Test Module Deduplication**: Removed redundant scratch module `tests/test_engine_and_ipc.py` and consolidated tests into dedicated single-responsibility modules.
+
+### Added
+- **Job Object Kernel Inspection Methods**: Added `query_limit_flags()`, `is_handle_inheritable()`, and `query_active_process_count()` to `WindowsJobObject` using Win32 `QueryInformationJobObject` and `GetHandleInformation`.
+- **7 Live Windows NT Failure Scenarios**: Automated and verified all 7 emergency scenarios in `tests/test_emergency_scenarios.py`:
+  1. Normal emergency shutdown with child process termination and halt persistence.
+  2. Supervisor crash (parent killed $\to$ Job Object terminates core via `KILL_ON_JOB_CLOSE`).
+  3. Core crash (core crashes or exits $\to$ supervisor detects and handles).
+  4. Child process containment (child spawns grandchild $\to$ all contained and killed).
+  5. Handle inheritance rejection (`HANDLE_FLAG_INHERIT == 0`, raw handle access returns `ERROR_INVALID_HANDLE`).
+  6. Halt lock persistence (startup blocked while halted, resume clears lock).
+  7. Repeated cycle (boot $\to$ emergency kill $\to$ resume $\to$ boot 10x consecutively).
+- **Test Suite Expansion**: Suite expanded to **70 automated tests** across **16 modules**, passing in **8.16s** with **85% line coverage** across `zoro.*`.
+- **Threat Model Update**: Documented the 3 explicit threat levels and DPAPI same-user boundaries in `SECURITY.md`.
+
+---
+
 ## [0.1.1] - 2026-11-15 (Milestone 1 Verification & Hardening)
 
 ### Fixed

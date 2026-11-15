@@ -83,6 +83,21 @@ def test_health_threshold_warnings(test_settings, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_governor_acquire_and_release_workload(test_settings):
+    """Verify governor admits workload when under ceiling and releases correctly."""
+    monitor = HealthMonitor(settings=test_settings)
+    monitor.initialize()
+    governor = ResourceGovernor(monitor, settings=test_settings)
+
+    acquired = await governor.acquire_gpu_workload()
+    assert acquired is True
+    assert governor._is_model_loaded is True
+
+    governor.release_gpu_workload()
+    monitor.close()
+
+
+@pytest.mark.asyncio
 async def test_governor_vram_ceiling_rejection(test_settings, monkeypatch):
     """Verify governor blocks new GPU tasks when VRAM usage exceeds ceiling."""
     monitor = HealthMonitor(settings=test_settings)

@@ -35,6 +35,7 @@ class ZoroSettings(BaseSettings):
     security_dir: Path = Field(default_factory=lambda: default_paths.security_dir)
     halt_lock_path: Path = Field(default_factory=lambda: default_paths.halt_lock_path)
     pid_path: Path = Field(default_factory=lambda: default_paths.pid_path)
+    audit_checkpoint_path: Path = Field(default_factory=lambda: default_paths.audit_checkpoint_path)
 
     # Hardware & Telemetry Thresholds
     max_vram_mb: int = 3600               # VRAM ceiling for 4GB GTX 1050 Ti
@@ -55,9 +56,9 @@ class ZoroSettings(BaseSettings):
     db_cache_size_kb: int = 8000          # 8 MB SQLite page cache
     db_synchronous: str = "NORMAL"
 
-    # Security
+    # Security (Keys are strictly DPAPI-protected; audit_hmac_key is optional legacy override for testing only)
     audit_enabled: bool = True
-    audit_hmac_key: str = "zoro-default-local-hmac-key"
+    audit_hmac_key: Optional[str] = None
     strict_permissions: bool = True
 
     # Desktop UI
