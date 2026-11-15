@@ -52,6 +52,11 @@ class LifecycleManager:
         self.state = new_state
         logger.info("Lifecycle transition: %s -> %s", old_state.value, new_state.value)
 
+    @property
+    def is_running(self) -> bool:
+        """Return True if system is in RUNNING state."""
+        return self.state == LifecycleState.RUNNING
+
     def register_shutdown_hook(self, hook: Callable[[], None]) -> None:
         """Register synchronous or asynchronous cleanup callback."""
         self._shutdown_hooks.append(hook)

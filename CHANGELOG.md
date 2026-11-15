@@ -4,6 +4,50 @@ All notable changes to PROJECT ZORO are documented in this file in reverse chron
 
 ---
 
+## [0.2.0] - 2026-11-16 (Milestone 02: The Intelligence Core)
+
+### Added
+- **AI Model Provider Abstraction Layer (`zoro.models`)**:
+  - `BaseModelProvider` interface specifying async completion (`chat_completion`), async chunk streaming (`chat_completion_stream`), health checks (`health_check`), capability inspection (`get_capabilities`), and model listing (`list_models`).
+  - Standardized Pydantic schemas: `ChatMessage`, `ChatCompletionRequest`, `ChatCompletionResponse`, `ChatCompletionChunk`, `ModelCapabilities`, `ModelInfo`, `ProviderHealth`.
+  - Normalized error hierarchy in `zoro.models.exceptions`: `ModelProviderError`, `ProviderUnavailableError`, `ProviderTimeoutError`, `ModelNotFoundError`, `CapabilityNotSupportedError`, `StructuredOutputError`, `ContextLengthExceededError`, `AuthenticationError`, `RateLimitError`.
+  - `OllamaProvider`: Native REST adapter for Ollama (`/api/chat`, `/api/tags`, `/api/show`, NDJSON line streaming).
+  - `LlamaCppProvider`: OpenAI-compatible HTTP adapter for `llama-server.exe` (`/v1/chat/completions`, Server-Sent Events chunk streaming, `/v1/models`).
+  - `MockModelProvider`: Deterministic responses, queueing, latency and error simulation for offline development and test automation.
+  - `ProviderRegistry`: Registry coordinating multiple runtimes, active provider/model selection, concurrent health probing with timeouts, and automatic fallback cascading with parameter adjustment.
+- **Hardware-Aware Model Benchmark Runner (`zoro.benchmarks`)**:
+  - `HardwareAwareBenchmarkRunner` measuring Time-to-First-Token (TTFT), sustained token throughput (tokens/sec), host RAM and GPU VRAM footprint via NVML C-bindings.
+  - Multi-dimensional capability evaluation: Structured JSON schema compliance, multi-constraint instruction following, and tool-calling protocol compatibility.
+  - Emits Pascal architecture (GTX 1050 Ti 4GB) saturation warnings when VRAM load approaches capacity.
+  - Results persisted to SQLite `model_benchmarks` table with full raw metrics JSON.
+- **Multi-Step Task Planner (`zoro.planner`)**:
+  - `TaskPlan` and `PlanStep` Pydantic models for structured plan decomposition, dependency mapping, and parameter binding.
+  - `DependencyGraph`: Directed Acyclic Graph (DAG) dependency validation and topological sort using Kahn's algorithm; cycle detection raises `CircularDependencyError`.
+  - `PlanValidator`: Structural and security validator enforcing step count bounds ($\le 20$), tool existence checks, argument schema checks, and automatic permission tier assignment.
+  - `PlanExecutor`: Asynchronous execution engine resolving dynamic outputs across steps (`{{step_id.key}}`), managing retries for transient tool failures, pausing on approval requirements, and persisting plan/step states to SQLite (`task_plans`, `task_steps`).
+- **Secure Tool Registry & Permission System (`zoro.tools`)**:
+  - `ToolRegistry`: Enforces application-level capability gates independent of LLM prompts.
+  - 5 capability permission tiers: `READ_ONLY`, `LOW_RISK`, `SENSITIVE`, `DESTRUCTIVE`, `SYSTEM_CRITICAL`.
+  - `ApprovalToken`: Single-use cryptographically generated token (`secrets.token_hex`), bound to specific tool and step IDs, unexpired, and transitioned immediately to `CONSUMED` upon first use (replay attack protection).
+  - Built-in secure tools in `zoro.tools.builtin.file_tools`: `FileDiscoveryTool`, `FileReadMetadataTool`, `ReportGeneratorTool`, `FileMoveTool`, `FileDeleteTool`.
+  - Hard lock protection against reading, overwriting, moving, or deleting security files (`audit.key`, `audit.checkpoint`, `emergency.lock`, `zoro.pid`, Windows system directories).
+- **Central AI Orchestrator (`zoro.orchestrator`)**:
+  - `ZoroOrchestrator`: Coordinates user interactions, intent understanding, provider selection, planning vs. direct chat routing, and tool dispatch.
+  - 9-state FSM: `IDLE`, `UNDERSTANDING`, `PLANNING`, `WAITING_FOR_APPROVAL`, `EXECUTING`, `WAITING_FOR_RESULT`, `COMPLETED`, `FAILED`, `CANCELLED`.
+  - Emergency halt verification before executing any request; active halt lock aborts execution immediately.
+  - Human approval pause & resume workflow: Sensitive or destructive operations pause execution in `WAITING_FOR_APPROVAL` state, returning an approval token. Resumes execution upon user authorization via `resolve_approval()`.
+- **Database Schema Migration 003 (`003_intelligence_core.sql`)**:
+  - Added 8 tables: `ai_providers`, `ai_models`, `model_benchmarks`, `conversations`, `messages`, `task_plans`, `task_steps`, `tool_executions`.
+- **Desktop HUD Shell Integration (`zoro.ui`)**:
+  - Added AI runtime controls to PySide6 HUD: Provider dropdown, model dropdown, real-time AI state badge, directive prompt input with dispatch button, cancel button, and benchmark execution button.
+  - Added real-time action authorization dialog with Approve and Reject buttons for paused plan steps.
+  - Named Pipe IPC integration with notification handlers for real-time state changes (`ai.state_changed`), approval requests (`ai.approval_requested`), and step updates (`ai.step_update`).
+- **Verification & Test Suite**:
+  - Test suite expanded to **125 automated tests** across **21 modules** (86 Milestone 01 tests + 39 Milestone 02 tests), passing with **100% pass rate** in **24.65s** with **86% line coverage** across `zoro.*`.
+  - Verified end-to-end intelligence pipeline over Named Pipe IPC (`test_e2e_intelligence.py`).
+
+---
+
 ## [0.1.5] - 2026-11-15 (Handle-Bound Emergency Termination & TOCTOU Race Elimination)
 
 ### Security Hardening & Race Elimination

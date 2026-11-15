@@ -27,6 +27,7 @@ $RECYCLE.BIN/
 *.pid
 logs/
 data/
+reports/
 *.db-wal
 *.db-shm
 *.db

@@ -1,14 +1,16 @@
-"""Main HUD Desktop Window displaying real-time telemetry and controls."""
+"""Main HUD Desktop Window displaying real-time telemetry, AI runtime controls, and task planning."""
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
+    QComboBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QProgressBar,
     QPushButton,
@@ -27,25 +29,42 @@ class ZoroMainWindow(QMainWindow):
     # Qt Signals for thread-safe UI updates from IPC client
     telemetry_received = Signal(dict)
     log_message_received = Signal(str)
+    ai_state_received = Signal(dict)
+    approval_requested = Signal(dict)
+    step_update_received = Signal(dict)
+    providers_received = Signal(dict)
+    benchmarks_received = Signal(dict)
 
-    def __init__(self, settings: Optional[ZoroSettings] = None) -> None:
+    def __init__(
+        self,
+        settings: Optional[ZoroSettings] = None,
+        ipc_call_handler: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
+    ) -> None:
         super().__init__()
         self.settings = settings or get_settings()
         self.emergency_mgr = EmergencyManager()
 
+        # IPC dispatch callback set by app.py
+        self.ipc_call_handler = ipc_call_handler
+        self._current_approval_token: Optional[str] = None
+
         self.setWindowTitle("PROJECT ZORO // SYSTEM HUD")
-        self.resize(self.settings.ui_window_width, self.settings.ui_window_height)
+        self.resize(self.settings.ui_window_width, self.settings.ui_window_height + 150)
 
         self._build_ui()
         self.telemetry_received.connect(self.update_telemetry)
         self.log_message_received.connect(self.append_log)
+        self.ai_state_received.connect(self.update_ai_state)
+        self.approval_requested.connect(self.display_approval_request)
+        self.step_update_received.connect(self.update_step_progress)
+        self.providers_received.connect(self.update_providers)
 
     def _build_ui(self) -> None:
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(16)
+        main_layout.setSpacing(14)
 
         # 1. Header Bar
         header_layout = QHBoxLayout()
@@ -59,12 +78,17 @@ class ZoroMainWindow(QMainWindow):
         self.status_pill.setObjectName("statusPill")
         header_layout.addWidget(self.status_pill)
 
+        self.ai_state_pill = QLabel("AI: IDLE", self)
+        self.ai_state_pill.setObjectName("aiStatePill")
+        self.ai_state_pill.setStyleSheet("background-color: #1a2332; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+        header_layout.addWidget(self.ai_state_pill)
+
         main_layout.addLayout(header_layout)
 
         # 2. Hardware Telemetry Section
         telemetry_group = QGroupBox("HOST HARDWARE TELEMETRY", self)
         telemetry_layout = QVBoxLayout(telemetry_group)
-        telemetry_layout.setSpacing(12)
+        telemetry_layout.setSpacing(8)
 
         # CPU Row
         cpu_box = QHBoxLayout()
@@ -87,7 +111,7 @@ class ZoroMainWindow(QMainWindow):
         ram_box.addWidget(self.ram_bar)
         self.ram_label = QLabel("0.0 / 16.0 GB", self)
         self.ram_label.setFixedWidth(180)
-        ram_box.addWidget(self.ram_label)
+        cpu_box.addWidget(self.ram_label)
         telemetry_layout.addLayout(ram_box)
 
         # GPU & VRAM Row
@@ -105,7 +129,71 @@ class ZoroMainWindow(QMainWindow):
 
         main_layout.addWidget(telemetry_group)
 
-        # 3. Activity Feed / HUD Console
+        # 3. AI Runtime & Provider Section (Milestone 02)
+        ai_runtime_group = QGroupBox("INTELLIGENCE CORE & LOCAL RUNTIME", self)
+        ai_layout = QHBoxLayout(ai_runtime_group)
+        ai_layout.setSpacing(12)
+
+        ai_layout.addWidget(QLabel("PROVIDER:", self))
+        self.combo_provider = QComboBox(self)
+        self.combo_provider.addItems(["mock", "ollama", "llama.cpp"])
+        self.combo_provider.currentTextChanged.connect(self._on_provider_changed)
+        ai_layout.addWidget(self.combo_provider)
+
+        ai_layout.addWidget(QLabel("MODEL:", self))
+        self.combo_model = QComboBox(self)
+        self.combo_model.addItems(["mock-v1", "qwen2.5:3b", "default"])
+        ai_layout.addWidget(self.combo_model)
+
+        self.btn_benchmark = QPushButton("Benchmark Model", self)
+        self.btn_benchmark.clicked.connect(self._on_benchmark_clicked)
+        ai_layout.addWidget(self.btn_benchmark)
+
+        main_layout.addWidget(ai_runtime_group)
+
+        # 4. Interactive Directive Input Bar
+        directive_group = QGroupBox("USER DIRECTIVE & PROMPT DISPATCH", self)
+        directive_layout = QHBoxLayout(directive_group)
+        self.input_prompt = QLineEdit(self)
+        self.input_prompt.setPlaceholderText("Enter command or request, e.g. 'Find all PDF files in Downloads and generate report'...")
+        self.input_prompt.returnPressed.connect(self._on_dispatch_clicked)
+        directive_layout.addWidget(self.input_prompt)
+
+        self.btn_dispatch = QPushButton("DISPATCH DIRECTIVE", self)
+        self.btn_dispatch.setStyleSheet("background-color: #008899; color: #ffffff; font-weight: bold;")
+        self.btn_dispatch.clicked.connect(self._on_dispatch_clicked)
+        directive_layout.addWidget(self.btn_dispatch)
+
+        self.btn_cancel = QPushButton("CANCEL", self)
+        self.btn_cancel.clicked.connect(self._on_cancel_clicked)
+        directive_layout.addWidget(self.btn_cancel)
+
+        main_layout.addWidget(directive_group)
+
+        # 5. Interactive Human-in-the-Loop Approval Box (Hidden until needed)
+        self.approval_group = QGroupBox("SECURITY AUTHORIZATION REQUIRED", self)
+        self.approval_group.setStyleSheet("QGroupBox { border: 2px solid #ffaa00; background-color: #1e1910; }")
+        approval_layout = QVBoxLayout(self.approval_group)
+        self.lbl_approval_desc = QLabel("Action requires authorization.", self)
+        self.lbl_approval_desc.setStyleSheet("color: #ffcc00; font-weight: bold;")
+        approval_layout.addWidget(self.lbl_approval_desc)
+
+        approval_btn_box = QHBoxLayout()
+        self.btn_approve = QPushButton("AUTHORIZE OPERATION", self)
+        self.btn_approve.setStyleSheet("background-color: #228833; color: white; font-weight: bold;")
+        self.btn_approve.clicked.connect(lambda: self._on_resolve_approval(True))
+        approval_btn_box.addWidget(self.btn_approve)
+
+        self.btn_reject = QPushButton("REJECT OPERATION", self)
+        self.btn_reject.setStyleSheet("background-color: #aa2222; color: white; font-weight: bold;")
+        self.btn_reject.clicked.connect(lambda: self._on_resolve_approval(False))
+        approval_btn_box.addWidget(self.btn_reject)
+
+        approval_layout.addLayout(approval_btn_box)
+        self.approval_group.hide()
+        main_layout.addWidget(self.approval_group)
+
+        # 6. Activity & Security Audit Feed Console
         feed_group = QGroupBox("ACTIVITY & SECURITY AUDIT FEED", self)
         feed_layout = QVBoxLayout(feed_group)
         self.console = QTextEdit(self)
@@ -113,9 +201,8 @@ class ZoroMainWindow(QMainWindow):
         feed_layout.addWidget(self.console)
         main_layout.addWidget(feed_group)
 
-        # 4. Action Controls Bar
+        # 7. Bottom Action Controls Bar
         action_layout = QHBoxLayout()
-
         self.btn_clear_log = QPushButton("Clear Display", self)
         self.btn_clear_log.clicked.connect(self.console.clear)
         action_layout.addWidget(self.btn_clear_log)
@@ -132,20 +219,17 @@ class ZoroMainWindow(QMainWindow):
     @Slot(dict)
     def update_telemetry(self, data: Dict[str, Any]) -> None:
         """Update live telemetry progress bars and labels."""
-        # CPU
         cpu_pct = int(data.get("cpu_percent", 0))
         self.cpu_bar.setValue(cpu_pct)
         cores = data.get("cpu_logical_cores", 8)
         self.cpu_label.setText(f"{data.get('cpu_percent', 0.0):.1f} % ({cores} Cores)")
 
-        # RAM
         ram_used = data.get("ram_used_mb", 0.0) / 1024
         ram_total = data.get("ram_total_mb", 16384.0) / 1024
         ram_pct = int(data.get("ram_percent", 0))
         self.ram_bar.setValue(ram_pct)
         self.ram_label.setText(f"{ram_used:.1f} / {ram_total:.1f} GB")
 
-        # GPU
         vram_used = data.get("vram_used_mb")
         vram_total = data.get("vram_total_mb")
         gpu_temp = data.get("gpu_temp_c", 0)
@@ -159,19 +243,94 @@ class ZoroMainWindow(QMainWindow):
 
         self.status_pill.setText("RUNNING // HEALTHY")
 
+    @Slot(dict)
+    def update_ai_state(self, payload: Dict[str, Any]) -> None:
+        new_state = payload.get("new_state", "IDLE")
+        self.ai_state_pill.setText(f"AI: {new_state}")
+        if new_state in ("WAITING_FOR_APPROVAL", "FAILED"):
+            self.ai_state_pill.setStyleSheet("background-color: #3d2010; color: #ffaa00; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+        elif new_state in ("EXECUTING", "PLANNING", "UNDERSTANDING"):
+            self.ai_state_pill.setStyleSheet("background-color: #102a3d; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+        else:
+            self.ai_state_pill.setStyleSheet("background-color: #1a2332; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+        self.append_log(f"[AI State] Transitioned to {new_state}")
+
+    @Slot(dict)
+    def display_approval_request(self, payload: Dict[str, Any]) -> None:
+        self._current_approval_token = payload.get("token")
+        desc = payload.get("description", "A sensitive operation requires user approval.")
+        tool = payload.get("tool_name", "Tool")
+        self.lbl_approval_desc.setText(f"ACTION REQUIRED: [{tool}] {desc}")
+        self.approval_group.show()
+        self.append_log(f"[APPROVAL] Authorization requested for {tool}: {desc}")
+
+    @Slot(dict)
+    def update_step_progress(self, payload: Dict[str, Any]) -> None:
+        desc = payload.get("description", "")
+        status = payload.get("status", "")
+        tool = payload.get("tool_name", "")
+        self.append_log(f"[Plan Step] '{desc}' via [{tool}] -> {status}")
+
+    @Slot(dict)
+    def update_providers(self, data: Dict[str, Any]) -> None:
+        active = data.get("active_provider")
+        if active and active in ["mock", "ollama", "llama.cpp"]:
+            self.combo_provider.setCurrentText(active)
+
     @Slot(str)
     def append_log(self, text: str) -> None:
-        """Append log line to HUD console."""
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.console.append(f"[{timestamp}] {text}")
 
+    def _on_provider_changed(self, provider_name: str) -> None:
+        self.append_log(f"Selected AI Provider: {provider_name}")
+        if self.ipc_call_handler:
+            self.ipc_call_handler("ai.select_provider", {"provider": provider_name})
+
+    def _on_benchmark_clicked(self) -> None:
+        provider = self.combo_provider.currentText()
+        model = self.combo_model.currentText()
+        self.append_log(f"Initiating benchmark on {provider}/{model}...")
+        if self.ipc_call_handler:
+            res = self.ipc_call_handler("ai.run_benchmark", {"provider": provider, "model": model})
+            if res and "result" in res:
+                m = res["result"]
+                self.append_log(f"[Benchmark Result] TTFT: {m.get('ttft_ms')}ms | Tok/s: {m.get('tokens_per_sec')} | JSON Score: {m.get('structured_json_score')} | VRAM: {m.get('vram_used_mb')}MB")
+
+    def _on_dispatch_clicked(self) -> None:
+        prompt = self.input_prompt.text().strip()
+        if not prompt:
+            return
+        self.input_prompt.clear()
+        self.append_log(f">> USER DIRECTIVE: {prompt}")
+        if self.ipc_call_handler:
+            res = self.ipc_call_handler("ai.prompt", {"prompt": prompt})
+            if res and "message" in res:
+                self.append_log(f"<< ZORO: {res['message']}")
+
+    def _on_cancel_clicked(self) -> None:
+        self.append_log("[COMMAND] Cancelling active operation...")
+        if self.ipc_call_handler:
+            self.ipc_call_handler("ai.cancel", {})
+
+    def _on_resolve_approval(self, approved: bool) -> None:
+        self.approval_group.hide()
+        if not self._current_approval_token:
+            return
+        token = self._current_approval_token
+        self._current_approval_token = None
+        action_str = "APPROVED" if approved else "REJECTED"
+        self.append_log(f"[Decision] User {action_str} operation token {token[:8]}.")
+        if self.ipc_call_handler:
+            res = self.ipc_call_handler("ai.resolve_approval", {"token": token, "approved": approved})
+            if res and "message" in res:
+                self.append_log(f"<< ZORO: {res['message']}")
+
     def _on_emergency_clicked(self) -> None:
-        """Trigger emergency hard kill."""
         self.append_log("[CRITICAL] EMERGENCY KILL BUTTON PRESSED BY USER.")
         self.status_pill.setText("HALTED // KILL ACTIVATED")
         self.emergency_mgr.trigger_emergency_kill("Emergency button in Desktop HUD pressed.")
 
     def closeEvent(self, event) -> None:
-        """Minimize to tray instead of quitting when window close button is pressed."""
         event.ignore()
         self.hide()

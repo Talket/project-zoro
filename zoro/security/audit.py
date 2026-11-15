@@ -138,6 +138,33 @@ class AuditLogger:
             return str(row[0])
         return GENESIS_HASH
 
+    async def get_recent_records(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Fetch the most recent audit records up to limit, ordered descending."""
+        rows = await self.db.execute_read(
+            "SELECT id, timestamp, actor, action, resource, details_json, prev_hash, record_hash "
+            "FROM audit_records ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        records = []
+        for row in rows:
+            details = {}
+            if row[5]:
+                try:
+                    details = json.loads(row[5])
+                except Exception:
+                    details = {"raw": row[5]}
+            records.append({
+                "id": row[0],
+                "timestamp": row[1],
+                "actor": row[2],
+                "action": row[3],
+                "resource": row[4],
+                "details": details,
+                "prev_hash": row[6],
+                "record_hash": row[7],
+            })
+        return records
+
     async def log_event(self, actor: str, action: str, resource: str, details: Dict[str, Any]) -> AuditRecord:
         """Append an event to the cryptographically chained audit log and update checkpoint."""
         prev_hash = await self.get_latest_hash()

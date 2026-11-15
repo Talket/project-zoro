@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -12,6 +12,7 @@ class ChatMessage(BaseModel):
     content: str
     name: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -20,7 +21,9 @@ class ChatCompletionRequest(BaseModel):
     temperature: float = 0.7
     max_tokens: int = 1024
     tools: Optional[List[Dict[str, Any]]] = None
-    response_format: Optional[Dict[str, Any]] = None  # JSON schema mode
+    response_format: Optional[Dict[str, Any]] = None  # JSON schema mode {"type": "json_object"}
+    stream: bool = False
+    timeout_seconds: float = 60.0
 
 
 class ChatCompletionResponse(BaseModel):
@@ -32,13 +35,31 @@ class ChatCompletionResponse(BaseModel):
     finish_reason: str = "stop"
 
 
+class ChatCompletionChunk(BaseModel):
+    id: str
+    model: str
+    delta_content: Optional[str] = None
+    delta_tool_calls: Optional[List[Dict[str, Any]]] = None
+    finish_reason: Optional[str] = None
+
+
 class ModelCapabilities(BaseModel):
     model_name: str
-    context_window: int
-    supports_tools: bool
-    supports_json_schema: bool
+    context_window: int = 4096
+    supports_tools: bool = False
+    supports_json_schema: bool = False
     supports_vision: bool = False
-    vram_estimate_mb: int
+    supports_streaming: bool = True
+    vram_estimate_mb: int = 0
+
+
+class ModelInfo(BaseModel):
+    name: str
+    size_bytes: Optional[int] = None
+    modified_at: Optional[str] = None
+    family: Optional[str] = None
+    quantization: Optional[str] = None
+    parameter_size: Optional[str] = None
 
 
 class ProviderHealth(BaseModel):
@@ -54,7 +75,14 @@ class BaseModelProvider(ABC):
 
     @abstractmethod
     async def chat_completion(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
-        """Generate a chat completion from the underlying model runtime."""
+        """Generate a complete chat completion."""
+        pass
+
+    @abstractmethod
+    async def chat_completion_stream(
+        self, request: ChatCompletionRequest
+    ) -> AsyncIterator[ChatCompletionChunk]:
+        """Stream chat completion chunks asynchronously."""
         pass
 
     @abstractmethod
@@ -65,4 +93,9 @@ class BaseModelProvider(ABC):
     @abstractmethod
     async def get_capabilities(self, model_name: str) -> ModelCapabilities:
         """Query supported context length, tool calling, and schema constraints."""
+        pass
+
+    @abstractmethod
+    async def list_models(self) -> List[ModelInfo]:
+        """List models available in the runtime."""
         pass

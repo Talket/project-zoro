@@ -101,11 +101,48 @@ PROJECT ZORO is engineered as an autonomous personal intelligence designed to ru
   - *Threat Boundary*: Protects against at-rest theft; does not isolate secrets from code executing under the same Windows interactive user identity.
 
 ### 3.5 Model Abstraction Layer (`zoro.models`)
-- `BaseModelProvider` decouples the system from specific model formats.
-- Supports `LlamaServerProvider` (native C++ `llama-server.exe` with exact `-ngl` GPU layer controls and `q8_0` KV cache quantization) and `OllamaProvider`.
-- Includes `MockModelProvider` for automated testing without requiring local weights.
+- `BaseModelProvider` decouples the system from specific model formats and inference runtimes.
+- Normalized error hierarchy: `ModelProviderError`, `ProviderUnavailableError`, `ProviderTimeoutError`, `ModelNotFoundError`, `CapabilityNotSupportedError`, `StructuredOutputError`, `ContextLengthExceededError`, `AuthenticationError`, `RateLimitError`.
+- Adapters implemented:
+  - `OllamaProvider`: Native REST adapter for Ollama (`/api/chat`, `/api/tags`, `/api/show`, NDJSON line streaming).
+  - `LlamaCppProvider`: OpenAI-compatible HTTP adapter for `llama-server.exe` (`/v1/chat/completions`, Server-Sent Events chunk streaming, `/v1/models`).
+  - `MockModelProvider`: Deterministic responses, queueing, latency and error simulation for offline testing and test suites.
+- `ProviderRegistry`: Coordinates multiple providers, active model selection, capability discovery, and automatic fallback cascading with model parameter substitution.
 
-### 3.6 Desktop Shell (`zoro.ui`)
-- PySide6 (Qt 6) application styled with a clean, functional dark theme.
-- Displays real-time hardware telemetry gauges, activity feeds, and system state.
-- Minimizable to the Windows System Tray with global context menu.
+### 3.6 Central AI Orchestrator (`zoro.orchestrator`)
+- `ZoroOrchestrator`: Coordinates intent understanding, model generation, task decomposition, and tool execution.
+- FSM State Machine: `IDLE`, `UNDERSTANDING`, `PLANNING`, `WAITING_FOR_APPROVAL`, `EXECUTING`, `WAITING_FOR_RESULT`, `COMPLETED`, `FAILED`, `CANCELLED`.
+- Direct Conversational vs. Task Planning branching: Conversational prompts route directly to active LLM; task/action directives trigger DAG plan synthesis.
+- Safety Boundary: Checked against `EmergencyManager` before processing any request; active halt lock aborts execution immediately.
+- Human Approval Pause & Resume: Sensitive or destructive operations pause execution in `WAITING_FOR_APPROVAL` state, returning a single-use approval token. Execution resumes upon user authorization via `resolve_approval()`.
+
+### 3.7 Multi-Step Task Planner (`zoro.planner`)
+- `TaskPlan` and `PlanStep`: Pydantic models for structured plan representations, retry counts, parameter bindings, and dependencies.
+- `DependencyGraph`: Directed Acyclic Graph (DAG) validator and topological execution order computation using Kahn's algorithm; cycle detection raises `CircularDependencyError`.
+- `PlanValidator`: Structural and security validation enforcing maximum step bounds ($\le 20$ steps), tool existence checks, argument schema checks, and automatic permission tier assignment.
+- `PlanExecutor`: Asynchronous execution engine resolving dynamic outputs across steps (`{{step_id.key}}`), managing retries for transient tool failures, pausing on approval requirements, and persisting plan/step states to SQLite (`task_plans`, `task_steps`).
+
+### 3.8 Secure Tool Registry & Permission System (`zoro.tools`)
+- `ToolRegistry`: Enforces application-level capability gates independent of LLM prompts.
+- Permission Tiers:
+  - `READ_ONLY`: File metadata inspection, search (Auto-allowed).
+  - `LOW_RISK`: Report generation, logging (Auto-allowed with audit trail).
+  - `SENSITIVE`: Moving/renaming user files (Requires explicit user approval).
+  - `DESTRUCTIVE`: Permanent deletion (Requires explicit user approval).
+  - `SYSTEM_CRITICAL`: Registry, OS changes (Requires elevated privileges).
+- Replay Protection: `ApprovalToken` is cryptographically generated (`secrets.token_hex`), bound to specific tool and step IDs, unexpired, and transitioned immediately to `CONSUMED` upon first use to prevent replay attacks.
+- Built-in Secure Tools: `FileDiscoveryTool`, `FileReadMetadataTool`, `ReportGeneratorTool`, `FileMoveTool`, `FileDeleteTool`.
+- Security Boundaries: Hard locks on security paths (`audit.key`, `audit.checkpoint`, `emergency.lock`, `zoro.pid`, Windows system directories).
+
+### 3.9 Local AI Model Benchmarking Subsystem (`zoro.benchmarks`)
+- `HardwareAwareBenchmarkRunner`: Automated benchmarking suite testing model runtimes under real hardware conditions.
+- Performance Metrics: Time-to-First-Token (TTFT) via asynchronous streaming, sustained token throughput (tokens/sec), host RAM and GPU VRAM load via NVML C-bindings.
+- Capability Scoring: Structured JSON generation compliance, multi-constraint instruction following, and tool-calling protocol compatibility.
+- Telemetry & Warnings: Emits Pascal architecture VRAM warnings when memory load approaches the 4 GB GTX 1050 Ti threshold. Persists historical results to `model_benchmarks`.
+
+### 3.10 Desktop Shell (`zoro.ui`)
+- PySide6 (Qt 6) application styled with a cybernetic dark HUD theme.
+- Hardware gauges for CPU, Host RAM, GPU VRAM, and GPU Core Temperature.
+- Milestone 02 Intelligence Controls: Provider dropdown, model selector, real-time AI state badge (`IDLE`, `PLANNING`, `WAITING_FOR_APPROVAL`, `EXECUTING`), directive input prompt with dispatch button, cancel button, and one-click benchmark execution button.
+- Real-Time Approval Dialog: Prompts user to Approve or Reject sensitive operations when paused by the orchestrator.
+- Minimizable to Windows System Tray with global context menu.

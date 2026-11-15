@@ -32,7 +32,11 @@ class IpcWorkerThread(threading.Thread):
 
     def run(self) -> None:
         logger.info("UI IPC worker thread started.")
+        self.window.ipc_call_handler = self.client.send_request
         self.client.register_notification_handler("telemetry.update", self._on_telemetry)
+        self.client.register_notification_handler("ai.state_changed", self._on_ai_state)
+        self.client.register_notification_handler("ai.approval_requested", self._on_approval_requested)
+        self.client.register_notification_handler("ai.step_update", self._on_step_update)
 
         backoff = 1.0
         while self._is_running:
@@ -46,6 +50,9 @@ class IpcWorkerThread(threading.Thread):
                         health = self.client.send_request("system.get_health")
                         if health:
                             self.window.telemetry_received.emit(health)
+                        providers = self.client.send_request("ai.get_providers")
+                        if providers:
+                            self.window.providers_received.emit(providers)
                     except Exception as e:
                         logger.error("Initial health request failed: %s", e)
                 else:
@@ -57,6 +64,18 @@ class IpcWorkerThread(threading.Thread):
     def _on_telemetry(self, method: str, data: Dict[str, Any]) -> None:
         """Forward telemetry data to Qt GUI thread via signal."""
         self.window.telemetry_received.emit(data)
+
+    def _on_ai_state(self, method: str, data: Dict[str, Any]) -> None:
+        """Forward AI orchestrator state changes to Qt GUI thread."""
+        self.window.ai_state_received.emit(data)
+
+    def _on_approval_requested(self, method: str, data: Dict[str, Any]) -> None:
+        """Forward human-in-the-loop authorization request to Qt GUI thread."""
+        self.window.approval_requested.emit(data)
+
+    def _on_step_update(self, method: str, data: Dict[str, Any]) -> None:
+        """Forward plan step progress to Qt GUI thread."""
+        self.window.step_update_received.emit(data)
 
     def stop(self) -> None:
         self._is_running = False
