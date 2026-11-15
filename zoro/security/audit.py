@@ -213,8 +213,18 @@ class AuditLogger:
         db_last_hash = rows[-1][7]
 
         if db_last_id != cp_seq:
-            logger.error("Audit tail deletion detected: database ends at ID %d, checkpoint expects ID %d.",
-                         db_last_id, cp_seq)
+            if db_last_id < cp_seq:
+                logger.error(
+                    "Audit tail deletion detected: database ends at ID %d, checkpoint expects ID %d.",
+                    db_last_id,
+                    cp_seq,
+                )
+            else:
+                logger.error(
+                    "Audit crash inconsistency detected: database is ahead (ID %d) of checkpoint (ID %d).",
+                    db_last_id,
+                    cp_seq,
+                )
             return False, cp_seq
 
         if db_last_hash != cp_hash:
@@ -245,3 +255,17 @@ class AuditLogger:
             expected_id += 1
 
         return True, None
+
+    def recover_checkpoint_manually(self, sequence_id: int, record_hash: str) -> None:
+        """
+        Manually re-anchor the audit checkpoint following a verified investigation.
+        MUST NEVER be called automatically during normal boot or on integrity error.
+        Requires explicit administrative authorization.
+        """
+        logger.warning(
+            "MANUAL CHECKPOINT RECOVERY: Re-anchoring checkpoint to seq=%d, hash=%s",
+            sequence_id,
+            record_hash,
+        )
+        self.write_checkpoint(sequence_id, record_hash)
+

@@ -39,8 +39,9 @@ def main() -> None:
         logger.error("Failed to create Windows Job Object. Aborting.")
         sys.exit(1)
 
-    # Assign current supervisor process to Job Object
+    # Assign current supervisor process to Job Object and record supervisor PID
     job.assign_process(os.getpid())
+    mgr.record_pid(os.getpid())
 
     # 3. Determine python executable (prefer venv)
     venv_python = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
@@ -52,7 +53,6 @@ def main() -> None:
     
     try:
         proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT))
-        mgr.record_pid(proc.pid)
         job.assign_process(proc.pid)
         logger.info("ZORO started with PID %d. Supervisor running.", proc.pid)
 

@@ -70,13 +70,18 @@ class JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
     ]
 
 
-JOB_OBJECT_DEFAULT_NAME = "Local\\ZoroJobObject"
+# Defaults to None (unnamed Job Object) to eliminate same-user handle retention
+# and attribute modification via OpenJobObjectW.
+JOB_OBJECT_DEFAULT_NAME: Optional[str] = None
 JOB_OBJECT_TERMINATE = 0x0001
 JOB_OBJECT_ALL_ACCESS = 0x1F001F
 
 
 class WindowsJobObject:
     """Manages a Windows Job Object to contain ZORO processes and guarantee atomic kill."""
+
+    DEFAULT_NAME: Optional[str] = JOB_OBJECT_DEFAULT_NAME
+    JOB_OBJECT_DEFAULT_NAME: Optional[str] = JOB_OBJECT_DEFAULT_NAME
 
     def __init__(self, name: Optional[str] = JOB_OBJECT_DEFAULT_NAME) -> None:
         self.name = name
@@ -115,13 +120,13 @@ class WindowsJobObject:
             logger.error("Failed to set Job Object information: error %d", err)
             return False
 
-        logger.info("Windows Job Object '%s' created and configured.", self.name)
+        logger.info("Windows Job Object '%s' created and configured.", self.name or "unnamed")
         return True
 
     @classmethod
-    def open_existing(cls, name: str = JOB_OBJECT_DEFAULT_NAME) -> Optional[WindowsJobObject]:
-        """Open an existing named Job Object."""
-        if os.name != "nt":
+    def open_existing(cls, name: Optional[str] = None) -> Optional[WindowsJobObject]:
+        """Open an existing named Job Object. Returns None if unnamed or non-existent."""
+        if not name or os.name != "nt":
             return None
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -135,8 +140,10 @@ class WindowsJobObject:
         return job
 
     @classmethod
-    def terminate_named_job(cls, name: str = JOB_OBJECT_DEFAULT_NAME, exit_code: int = 137) -> bool:
+    def terminate_named_job(cls, name: Optional[str] = None, exit_code: int = 137) -> bool:
         """Find an existing named Job Object and terminate all processes inside it."""
+        if not name:
+            return False
         job = cls.open_existing(name)
         if not job:
             return False

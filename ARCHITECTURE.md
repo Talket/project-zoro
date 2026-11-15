@@ -81,14 +81,16 @@ PROJECT ZORO is engineered as an autonomous personal intelligence designed to ru
 
 ### 3.4 OS Security & Emergency Controller (`zoro.security`)
 - **Process Isolation via Win32 Job Object**:
-  - All ZORO processes (supervisor, engine, UI, worker subprocesses) are assigned to `WindowsJobObject` (`Local\ZoroJobObject`).
+  - All ZORO processes (supervisor, engine, UI, worker subprocesses) are assigned to `WindowsJobObject`.
+  - **Unnamed in Production**: Created without a name (`name=None`), completely closing the named-object attack surface where external same-user processes could call `OpenJobObjectW` to clear `LimitFlags` or retain extra handles.
   - Created with NULL security attributes; kernel query confirms `HANDLE_FLAG_INHERIT == 0` (non-inheritable).
   - Configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000` and zero breakaway flags (`JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0`, `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0`).
   - Child processes cannot breakaway, inherit job handles, or remove themselves from the job.
-  - If the supervisor process crashes or closes its handle, the Windows NT kernel immediately terminates all descendant processes.
+  - When the supervisor process exits, crashes, or is terminated by the emergency controller, the Windows NT kernel closes the sole handle in existence and terminates all descendant processes immediately.
+  - *Scope Note*: Direct subprocesses are strictly contained; processes spawned via out-of-band external brokers (COM, WMI, Task Scheduler) execute outside the process tree.
 - **Hard Kill Switch**:
-  - Standalone controller `scripts/emergency_kill.py` executes `TerminateJobObject`, atomically terminating the process tree with exit code 137.
-  - Fallback process tree termination uses `taskkill /F /T /PID`.
+  - Standalone controller `scripts/emergency_kill.py` terminates the supervisor process tree via `taskkill /F /T /PID`.
+  - Terminating the supervisor closes the unnamed Job Object handle, triggering kernel-level `KILL_ON_JOB_CLOSE`.
 - **Halt State Immutability & Resumption**:
   - The halt file is placed in `%PROGRAMDATA%\Zoro\Security\halt.lock` (or repository data directory).
   - Preflight checks in `ZoroEngine` and `zoro.__main__` abort initialization if `halt.lock` exists.
@@ -96,6 +98,7 @@ PROJECT ZORO is engineered as an autonomous personal intelligence designed to ru
 - **DPAPI Credential Storage**:
   - HMAC keys are protected at rest via Windows Data Protection API (`CryptProtectData`).
   - Decryption failure raises `RuntimeError` and refuses key overwrite, preserving historical audit records.
+  - *Threat Boundary*: Protects against at-rest theft; does not isolate secrets from code executing under the same Windows interactive user identity.
 
 ### 3.5 Model Abstraction Layer (`zoro.models`)
 - `BaseModelProvider` decouples the system from specific model formats.

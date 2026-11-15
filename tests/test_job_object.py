@@ -113,3 +113,98 @@ def test_job_object_active_process_accounting():
     finally:
         job.close()
 
+
+def test_unnamed_job_object_default_and_non_openable():
+    """Verify that default WindowsJobObject is unnamed, non-inheritable, and cannot be opened by name."""
+    job = WindowsJobObject()  # default is unnamed
+    assert job.name is None
+    assert job.create() is True
+
+    try:
+        if os.name == "nt":
+            assert job.handle is not None
+            assert job.is_handle_inheritable() is False
+
+            # open_existing with None must return None
+            assert WindowsJobObject.open_existing(None) is None
+            assert WindowsJobObject.terminate_named_job(None) is False
+
+            # Win32 OpenJobObjectW with NULL fails with ERROR_INVALID_PARAMETER (87)
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenJobObjectW.restype = wintypes.HANDLE
+            kernel32.OpenJobObjectW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+            h = kernel32.OpenJobObjectW(0x1F001F, False, None)
+            err = ctypes.get_last_error()
+            assert h is None
+            assert err == 87
+    finally:
+        job.close()
+
+
+def test_named_job_object_same_user_access_proof():
+    """
+    Demonstrate the exact security reason why named Job Objects are avoided by default:
+    When a named Job Object is created with default DACL, an external same-user process
+    CAN open it with QUERY, TERMINATE, and ALL_ACCESS.
+    """
+    if os.name != "nt":
+        return
+
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenJobObjectW.restype = wintypes.HANDLE
+    kernel32.OpenJobObjectW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+
+    job_name = r"Local\ZoroTestNamedProofAudit"
+    job = WindowsJobObject(name=job_name)
+    assert job.create() is True
+
+    try:
+        # Same-user process can open with JOB_OBJECT_QUERY (0x4)
+        h_query = kernel32.OpenJobObjectW(0x0004, False, job_name)
+        assert h_query is not None
+        kernel32.CloseHandle(h_query)
+
+        # Same-user process can open with JOB_OBJECT_TERMINATE (0x1)
+        h_term = kernel32.OpenJobObjectW(0x0001, False, job_name)
+        assert h_term is not None
+        kernel32.CloseHandle(h_term)
+
+        # Same-user process can open with JOB_OBJECT_ALL_ACCESS (0x1F001F)
+        h_all = kernel32.OpenJobObjectW(0x1F001F, False, job_name)
+        assert h_all is not None
+        kernel32.CloseHandle(h_all)
+    finally:
+        job.close()
+
+
+def test_unnamed_job_object_kill_on_close_unconditional():
+    """Verify that closing the handle on an unnamed Job Object immediately terminates contained child processes."""
+    if os.name != "nt":
+        return
+
+    import psutil
+    job = WindowsJobObject(name=None)
+    assert job.create() is True
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assigned = job.assign_process(child.pid)
+        assert assigned is True
+        assert psutil.pid_exists(child.pid)
+
+        # Close handle directly (simulates supervisor exit / crash)
+        job.close()
+        time.sleep(0.4)
+
+        # Child must be terminated unconditionally
+        assert not psutil.pid_exists(child.pid)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+

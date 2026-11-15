@@ -82,13 +82,9 @@ class EmergencyManager:
         except Exception as e:
             logger.error("Failed to write emergency halt lockfile: %s", e)
 
-        # 2. Terminate Windows Job Object
-        terminated = WindowsJobObject.terminate_named_job(exit_code=137)
-        if not terminated:
-            job = WindowsJobObject()
-            if job.create():
-                job.terminate_all(exit_code=137)
-                job.close()
+        # 2. Terminate Windows Job Object if named
+        if WindowsJobObject.JOB_OBJECT_DEFAULT_NAME:
+            WindowsJobObject.terminate_named_job(name=WindowsJobObject.JOB_OBJECT_DEFAULT_NAME, exit_code=137)
 
         # 3. Fallback: taskkill process tree
         target_pid = self.get_recorded_pid()

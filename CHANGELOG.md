@@ -4,6 +4,20 @@ All notable changes to PROJECT ZORO are documented in this file in reverse chron
 
 ---
 
+## [0.1.3] - 2026-11-15 (Job Object Re-Architecture & Audit Crash Consistency)
+
+### Fixed
+- **Named Job Object Security Vulnerability**: Resolved the vulnerability where named Job Objects (`Local\ZoroJobObject`) had a default DACL granting `JOB_OBJECT_ALL_ACCESS` to same-user processes, allowing external processes to retain handles and prevent `KILL_ON_JOB_CLOSE` from firing, or clear `LimitFlags` via `JOB_OBJECT_SET_ATTRIBUTES`. Re-architected `WindowsJobObject` to be **UNNAMED** by default (`name=None`). Unnamed Job Objects cannot be opened by name (`OpenJobObjectW` returns error 87), ensuring the supervisor's handle is the sole handle in existence.
+- **Supervisor Job Ownership**: Configured `scripts/supervisor.py` to record the supervisor's PID so that `emergency_kill.py` terminates the supervisor process, guaranteeing that the unnamed Job Object handle closes and kernel `KILL_ON_JOB_CLOSE` fires unconditionally.
+- **Threat Model Corrections**: Corrected `SECURITY.md` and `ARCHITECTURE.md` to remove overstated claims regarding DPAPI and cold boot attacks, explicitly distinguishing direct process containment from out-of-band external brokers (COM, WMI, Task Scheduler) and clarifying same-user process boundaries.
+
+### Added
+- **Audit Checkpoint Crash Consistency Verification**: Added tests and verification covering crashes before checkpoint replacement (database ahead of checkpoint), stray `.tmp` file resilience, missing checkpoint fail-closed behavior, and explicit manual recovery policy.
+- **Job Object Handle Security Tests**: Added unit tests verifying unnamed Job Object non-openable status, empirical proof of named job same-user access, and unconditional termination on close.
+- **Test Suite Expansion**: Suite expanded to **76 automated tests** across **16 modules**, passing with **100% pass rate** in **9.54s** with **86% line coverage** across `zoro.*`.
+
+---
+
 ## [0.1.2] - 2026-11-15 (Milestone 1 Final Security Hardening & Acceptance)
 
 ### Fixed

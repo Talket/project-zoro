@@ -3,15 +3,15 @@
 ## 1. Security Philosophy & Threat Model Principles
 
 PROJECT ZORO operates on principles of bounded autonomy, fail-closed defenses, and defense-in-depth. 
-No component of the artificial intelligence makes unfounded claims of being "tamper-proof." Instead, the architecture establishes well-defined security boundaries, cryptographic tamper-evidence, and kernel-enforced process containment.
+No component of the artificial intelligence makes claims of being "tamper-proof" or "impossible to bypass." Instead, the architecture establishes well-defined security boundaries, cryptographic tamper-evidence, and kernel-enforced process containment.
 
 ### The Three Threat Levels
 
-| Threat Level | Adversary / Failure Mode | Defense Mechanism & Architectural Guarantee |
-| :--- | :--- | :--- |
-| **Level 1: Accidental Breakaway & Runaway Workloads** | Unhandled exceptions, infinite tool loops, hung worker threads, or subprocesses spawned with `CREATE_NEW_PROCESS_GROUP`. | **Fully Mitigated**: Windows Job Object process containment traps all descendant processes. Kernel-level `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and zero-breakaway enforcement guarantee atomic termination of the entire process tree on supervisor exit or emergency trigger. |
-| **Level 2: Malicious Child at Same User Privilege** | Compromised code running within ZORO's interactive desktop session attempting to conceal its actions, tamper with logs, or persist beyond a kill signal. | **Tamper-Evident & Contained**: Job Object prevents process removal (Windows NT kernel provides no API to remove an assigned process). DPAPI and external HMAC checkpointing make log tampering and tail deletion detectable upon verification. Filesystem locks prevent concurrent state tampering. *Limitation*: A same-user process with arbitrary memory read access can theoretically invoke DPAPI while running under the same user token; true process isolation requires the future separate-service architecture. |
-| **Level 3: Elevated Administrator / SYSTEM** | An attacker or compromised process with elevated administrative privileges on the Windows host. | **Outside Security Boundary**: Standard Windows security model: an elevated Administrator or SYSTEM token can bypass any same-user DACL, read arbitrary process memory, alter Job Objects, or delete system locks. ZORO does not run as Administrator and refuses UAC elevation prompts. |
+| Threat Level | Adversary / Failure Mode | Defense Mechanism & Architectural Guarantee | Residual Risks & Boundaries |
+| :--- | :--- | :--- | :--- |
+| **Level 1: Accidental Breakaway & Runaway Workloads** | Unhandled exceptions, infinite tool loops, hung worker threads, or subprocesses spawned with `CREATE_NEW_PROCESS_GROUP`. | **Fully Mitigated**: Windows Job Object process containment traps all direct descendant processes. Kernel-level `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and zero-breakaway enforcement guarantee atomic termination of the contained process tree on supervisor exit or emergency trigger. | None within standard process trees. |
+| **Level 2: Malicious Code at Same User Privilege** | Compromised code running within ZORO's interactive desktop session attempting to conceal actions, tamper with logs, or persist beyond a kill signal. | **Tamper-Evident & Contained**: Unnamed Job Objects prevent same-user handle retention or attribute tampering. DPAPI encryption at rest and external HMAC checkpointing make log tampering and tail deletion detectable upon verification. Filesystem locks prevent concurrent state deletion. | **Known Boundary**: A same-user process executing arbitrary code can invoke DPAPI under the same user session, terminate processes, or spawn detached tasks via out-of-band OS brokers (e.g., WMI, COM, Task Scheduler). True privilege isolation requires a separate-service security principal. |
+| **Level 3: Elevated Administrator / SYSTEM** | An attacker or compromised process with elevated administrative privileges on the Windows host. | **Outside Security Boundary**: Standard Windows security model: an elevated Administrator or SYSTEM token can bypass any same-user DACL, read arbitrary process memory, terminate Job Objects, or delete system locks. ZORO does not run as Administrator and rejects UAC elevation prompts. | Elevated attackers can override any user-mode boundary. |
 
 ---
 
@@ -19,81 +19,86 @@ No component of the artificial intelligence makes unfounded claims of being "tam
 
 ### 2.1 Windows Job Object Process Containment
 
-Process lifecycle and emergency containment are managed via the Win32 Job Object API (`zoro/security/job_object.py` and `scripts/supervisor.py`):
+Process containment is managed via the Win32 Job Object API (`zoro/security/job_object.py` and `scripts/supervisor.py`):
 
-1. **Handle Ownership & Non-Inheritance**:
-   - The Job Object handle is created by the Supervisor process via `CreateJobObjectW(NULL, "Local\\ZoroJobObject")`.
-   - By passing `NULL` security attributes, the handle is non-inheritable.
-   - **Kernel Guarantee**: `GetHandleInformation` verifies `HANDLE_FLAG_INHERIT == 0`. Child processes do NOT inherit the handle in their handle table. Any attempt by a child process to call `TerminateJobObject` or `SetInformationJobObject` using the parent's handle value is rejected by the kernel with `ERROR_INVALID_HANDLE` (WinError 6).
-2. **Kernel Limit Configuration**:
-   - `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (0x00002000)`: Configured in `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`. When the Supervisor closes its handle or crashes, the Windows NT kernel automatically and atomically terminates every process contained within the job.
-   - `JOB_OBJECT_LIMIT_BREAKAWAY_OK (0x00000800)`: **Explicitly set to 0 (Disabled)**.
-   - `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK (0x00001000)`: **Explicitly set to 0 (Disabled)**.
-   - Any child process attempting to spawn a process using the `CREATE_BREAKAWAY_FROM_JOB` flag is denied by the Windows kernel with `ERROR_ACCESS_DENIED`.
-3. **Descendant Containment**:
-   - Every child, grandchild, and descendant process spawned by any process in the Job Object is automatically and immutably assigned to the Job Object by the kernel.
-   - The Windows NT kernel provides no function to remove an assigned process from a Job Object; once assigned, containment lasts until process termination.
+1. **Unnamed Job Object Architecture (Production Default)**:
+   - In production, ZORO uses an **UNNAMED** Job Object (`WindowsJobObject(name=None)`).
+   - **Why Named Job Objects are Avoided**: Win32 security analysis confirms that creating a named Job Object (`Local\ZoroJobObject`) with default security attributes assigns a DACL granting `JOB_OBJECT_ALL_ACCESS` (0x1F003F) to the creating user's SID. Consequently, any process running in the same user session could call `OpenJobObjectW` and:
+     - Retain an additional handle, preventing `KILL_ON_JOB_CLOSE` from firing when the supervisor terminates (the kernel requires the *last* handle to close).
+     - Call `SetInformationJobObject` with `JOB_OBJECT_SET_ATTRIBUTES` to clear `LimitFlags = 0` or enable breakaway.
+   - **Unnamed Job Protection**: Because the Job Object has no name in the Windows Object Manager namespace, `OpenJobObjectW(..., None)` returns `ERROR_INVALID_PARAMETER` (87). No external process can discover, open, or hold a handle to it.
+2. **Handle Ownership & Non-Inheritance**:
+   - The handle is created solely by the Supervisor process with `NULL` security attributes.
+   - **Kernel Guarantee**: `GetHandleInformation` verifies `HANDLE_FLAG_INHERIT == 0`. Child processes do NOT inherit the handle in their handle table (`ERROR_INVALID_HANDLE` 6 on access attempts).
+   - Because only the Supervisor holds the handle, the Supervisor's exit or termination is guaranteed to close the *last handle* in existence.
+3. **Kernel Limit Configuration**:
+   - `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (0x00002000)`: Configured in `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`. When the Supervisor closes its handle, crashes, or is killed, the Windows NT kernel immediately terminates every process contained within the job.
+   - `JOB_OBJECT_LIMIT_BREAKAWAY_OK (0x00000800)`: Explicitly 0 (Disabled).
+   - `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK (0x00001000)`: Explicitly 0 (Disabled).
+   - Any child process attempting to spawn a process with `CREATE_BREAKAWAY_FROM_JOB` is denied by the Windows kernel with `ERROR_ACCESS_DENIED`.
+4. **Scope of Process Containment**:
+   - **Contained**: All direct child, grandchild, and descendant processes created via Win32 `CreateProcess` or Python `subprocess.Popen` are automatically assigned to the Job Object.
+   - **Not Contained (Brokered Execution)**: Processes launched through external operating system brokers or RPC services (e.g., scheduled tasks via `schtasks.exe`, COM objects via `CoCreateInstance`, or WMI process creation) execute outside the caller's process tree and are NOT assigned to the Job Object unless an external monitor explicitly captures their PIDs.
 
-### 2.2 Independent Emergency Controller & Halt State
+### 2.2 Emergency Shutdown Mechanism
 
-Emergency shutdown operates independently of the ZORO runtime, orchestrator, and agents:
+Emergency shutdown operates through a coordinated sequence:
 
-- **Independent Script**: `scripts/emergency_kill.py` can be executed directly from PowerShell, CMD, or desktop shortcut (`scripts/emergency_kill.bat`).
-- **Atomic Termination Sequence**:
-  1. Writes the emergency halt state to `%PROGRAMDATA%\Zoro\Security\halt.lock` (or repository data path).
-  2. Dispatches `WindowsJobObject.terminate_named_job(exit_code=137)` to trigger immediate kernel-level termination of the job.
-  3. Executes fallback process tree termination via `taskkill /F /T /PID <target_pid>`.
-  4. Clears active PID records.
-- **Fail-Closed Pre-flight Boot Gate**:
-  - `ZoroEngine.initialize()` and `zoro.__main__` check for `halt.lock` before initializing any subsystem.
-  - If `halt.lock` exists, startup is immediately aborted with exit code 1.
-  - Resumption is permitted **only** after explicitly clearing the lock via `python scripts/emergency_kill.py --resume` or `scripts/resume_zoro.bat`.
+1. **Independent Invocation**: `scripts/emergency_kill.py` can be executed from a desktop shortcut (`emergency_kill.bat`) or shell.
+2. **Execution Sequence**:
+   - **Step 1: Write Halt Lock**: Writes the emergency halt state to `%PROGRAMDATA%\Zoro\Security\halt.lock` (or repository data directory).
+   - **Step 2: Terminate Supervisor Process**: Reads the supervisor PID from `zoro.pid` and terminates it via `taskkill /F /T /PID <pid>`.
+   - **Step 3: Kernel Job Object Termination**: Terminating the supervisor closes the sole handle to the unnamed Job Object. The Windows NT kernel immediately executes `KILL_ON_JOB_CLOSE`, killing all processes in the job tree.
+   - **Step 4: Cleanup**: Clears runtime PID records.
+3. **Fail-Closed Pre-flight Boot Gate**:
+   - `ZoroEngine.initialize()` and `zoro.__main__` check for `halt.lock` before initializing any subsystem.
+   - If `halt.lock` exists, startup aborts immediately with exit code 1.
+   - Resumption requires explicitly running `python scripts/emergency_kill.py --resume` or `scripts/resume_zoro.bat`.
 
 ---
 
-## 3. Cryptographic Audit Logging & Tamper-Evidence
+## 3. Cryptographic Audit Logging & Crash Consistency
 
 ### 3.1 Hash Chaining & HMAC Protection
 
-All security-sensitive operations (startup, shutdown, permission decisions, IPC events) are logged in SQLite (`audit_records` table) with cryptographic verification:
+Security-sensitive operations are logged in SQLite (`audit_records` table) with cryptographic verification:
 
 - **HMAC-SHA256**: Each record computes an HMAC signature over `(prev_hash, timestamp, actor, action, resource, details_json)`.
-- **Sequential Chaining**: `prev_hash` links each record to its immediate predecessor. The initial genesis record links to an 8-zero seed string (`00000000`).
-- **Middle Deletion & Record Modification Detection**: Modifying any field in an existing record invalidates its `record_hash`. Deleting an intermediate record breaks the `prev_hash` link to subsequent records, causing `verify_integrity()` to fail.
+- **Sequential Chaining**: `prev_hash` links each record to its immediate predecessor. The genesis record links to `00000000`.
+- **Middle Deletion & Alteration**: Modifying any field invalidates `record_hash`. Deleting an intermediate record breaks sequence IDs and `prev_hash` chaining.
 
 ### 3.2 Tail-Deletion Detection via External Checkpoint
 
-Sequential IDs and hash chaining alone cannot detect deletion of the trailing records of a chain (e.g. records 8-10 deleted from a 10-record log leave records 1-7 forming an unbroken chain). ZORO addresses this via an independent, trusted audit checkpoint:
+Deleting trailing records cannot be caught by DB hash chaining alone (records 1..$M$ remain valid). ZORO uses an independent, trusted checkpoint:
 
 - **Checkpoint File**: Stored at `data/security/audit.checkpoint`.
-- **Checkpoint Data**:
-  ```json
-  {
-    "last_sequence_id": 142,
-    "last_record_hash": "a1b2c3d4...",
-    "timestamp": "2026-11-15T16:00:00Z",
-    "signature": "e5f6g7h8..."
-  }
-  ```
-- **HMAC Sealed**: The checkpoint records the exact sequence ID and hash of the latest committed audit record, signed with an HMAC-SHA256 signature using the DPAPI key.
-- **Atomic Writes**: Writes use `tempfile` + `os.fsync` + `os.replace` to ensure zero-byte or partially written files cannot corrupt the checkpoint state during sudden system power loss.
-- **Fail-Closed Verification**: `verify_integrity()` verifies:
-  1. Database record hash continuity from genesis to the last DB record.
-  2. Checkpoint signature validity.
-  3. Consistency between checkpoint `last_sequence_id` / `last_record_hash` and the actual database state.
-  4. If database records are truncated or fewer than the checkpoint records, or if the checkpoint signature is modified, integrity verification fails immediately.
+- **Checkpoint Payload**: `last_sequence_id`, `last_record_hash`, `timestamp`, and DPAPI-HMAC `signature`.
+- **Atomic Writes**: Uses `NamedTemporaryFile`, followed by `os.fsync(f.fileno())` and atomic `os.replace()`.
+- **Fail-Closed Dual Verification**:
+  - `verify_integrity()` checks database hash continuity and checkpoint HMAC validity.
+  - Verifies that `db_last_id == checkpoint.last_sequence_id` and `db_last_hash == checkpoint.last_record_hash`.
+  - Distinguishes **tail deletion** (`db_last_id < cp_seq`) from **crash inconsistency** (`db_last_id > cp_seq`). Both fail closed.
 
-### 3.3 Windows DPAPI Key Lifecycle & Limitations
+### 3.3 Checkpoint Crash Consistency & Recovery Policy
 
-The HMAC key used for audit record and checkpoint signing is managed by Windows Data Protection API (DPAPI) via `zoro/security/dpapi.py`:
+- **Crash Scenarios & Behavior**:
+  1. *Crash during temporary file creation*: Stray `.tmp` files in the directory are ignored; the valid atomic checkpoint remains intact.
+  2. *Crash after file flush, during replacement*: `os.replace()` on Windows NTFS (`MoveFileExW`) is an atomic directory metadata transaction. Either the previous or new checkpoint is present.
+  3. *Crash after database commit before checkpoint write*: Database is ahead of checkpoint (`db_last_id > cp_seq`). `verify_integrity()` detects the mismatch and fails closed.
+- **Fail-Closed Policy (No Silent Regeneration)**:
+  - The runtime **NEVER silently regenerates or updates the checkpoint** upon detecting an integrity mismatch.
+  - All historical audit records in SQLite remain intact and recoverable for forensic investigation.
+  - If investigation confirms an interrupted write, re-anchoring requires calling `AuditLogger.recover_checkpoint_manually()` under explicit owner instruction.
 
-- **At-Rest Protection**:
-  The raw 256-bit cryptographic key is encrypted via `CryptProtectData` with `CRYPTPROTECT_UI_FORBIDDEN`. The ciphertext is stored in `data/security/audit.key`.
-- **Decryption Fail-Closed Policy**:
-  If `audit.key` exists but cannot be decrypted (e.g. corrupted ciphertext or invalid user credential context), `AuditKeyManager.get_or_create_key()` logs a critical security alert and raises `RuntimeError`. It **strictly refuses** to overwrite the existing key or silently generate a new one, preventing the permanent invalidation of historical audit trails.
-- **Explicit DPAPI Threat Boundary**:
-  - **What DPAPI Protects**: Protects the key against offline disk extraction, unauthenticated access, and other standard user accounts on the same Windows host.
-  - **What DPAPI Does NOT Protect**: Does NOT protect against other code executing under the **same Windows user identity**. Because DPAPI derives encryption keys from the currently logged-in user's profile, any executable or script running in the owner's session can call `CryptUnprotectData`. Plaintext keys are never stored in settings files or repositories.
+### 3.4 Windows DPAPI Key Lifecycle & Boundaries
+
+The 256-bit HMAC key is managed by Windows DPAPI via `zoro/security/dpapi.py`:
+
+- **At-Rest Protection**: Key ciphertext is encrypted via `CryptProtectData` with `CRYPTPROTECT_UI_FORBIDDEN` and stored in `data/security/audit.key`.
+- **Decryption Fail-Closed Policy**: If `audit.key` exists but decryption fails, `AuditKeyManager.get_or_create_key()` logs a critical error and raises `RuntimeError`. It strictly refuses to overwrite the existing key or silently generate a new one, protecting historical audit logs from permanent invalidation.
+- **Explicit Threat Boundaries**:
+  - **What DPAPI Protects**: Protects stored key material at rest against offline disk extraction, volume theft, and access from other Windows user profiles.
+  - **What DPAPI Does NOT Protect**: Does NOT isolate secrets from malicious software executing under the **same Windows user identity**. Because DPAPI derives keys from the active logon token, any executable running under the owner's account can invoke `CryptUnprotectData`. Plaintext keys are never stored in settings or files.
 
 ---
 
@@ -103,9 +108,9 @@ Actions are categorized into 5 privilege tiers (`zoro/security/permissions.py`):
 
 1. **`READ_ONLY`**: Reading files, querying system telemetry, inspecting logs. Allowed automatically.
 2. **`REVERSIBLE_CHANGE`**: Creating scratch files, updating application config, staging edits. Allowed with audit log.
-3. **`IRREVERSIBLE_CHANGE`**: Deleting files, modifying existing source code, killing external processes. Requires explicit user confirmation.
-4. **`SYSTEM_SETTING`**: Modifying Windows registry, changing environment variables, altering network adapters. Requires explicit confirmation and elevation warning.
-5. **`EXTERNAL_COMMUNICATION`**: Sending network packets to non-local IP addresses, sending emails, external API queries. Requires user confirmation.
+3. **`IRREVERSIBLE_CHANGE`**: Deleting files, modifying source code, killing external processes. Requires user confirmation.
+4. **`SYSTEM_SETTING`**: Modifying Windows registry, altering environment variables. Requires confirmation and elevation warning.
+5. **`EXTERNAL_COMMUNICATION`**: Sending outbound network packets, external API queries. Requires user confirmation.
 
 ### Permanently Protected Paths
 

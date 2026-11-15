@@ -196,3 +196,103 @@ async def test_audit_checkpoint_persistence_across_restart(temp_dir, test_settin
     assert is_valid is True
     assert err_id is None
     await db2.close()
+
+
+@pytest.mark.asyncio
+async def test_audit_crash_consistency_database_ahead_and_manual_recovery(test_db, test_settings):
+    """
+    Verify crash consistency when execution is interrupted after DB commit
+    but before checkpoint replacement:
+    1. Inconsistency is detected (fail-closed).
+    2. Checkpoint is NOT silently regenerated.
+    3. Historical records remain fully recoverable.
+    4. Manual recovery re-anchors the checkpoint cleanly.
+    """
+    key = b"test_key_1234567890123456789012"
+    audit = AuditLogger(test_db, settings=test_settings, key=key)
+
+    # 1. Log 3 records normally
+    rec1 = await audit.log_event("User", "STEP_1", "res1", {})
+    rec2 = await audit.log_event("User", "STEP_2", "res2", {})
+    rec3 = await audit.log_event("User", "STEP_3", "res3", {})
+    assert (await audit.verify_integrity())[0] is True
+
+    # 2. Simulate crash: Commit record 4 directly to DB, bypassing write_checkpoint()
+    prev_hash = rec3.record_hash
+    ts4 = "2026-11-15T20:00:00.000000+00:00"
+    details4 = json.dumps({"note": "uncheckpointed"}, sort_keys=True)
+    hash4 = audit._compute_hash(prev_hash, ts4, "User", "STEP_4", "res4", details4)
+    await test_db.execute_write(
+        "INSERT INTO audit_records (id, timestamp, actor, action, resource, details_json, prev_hash, record_hash) "
+        "VALUES (4, ?, ?, ?, ?, ?, ?, ?)",
+        (ts4, "User", "STEP_4", "res4", details4, prev_hash, hash4),
+    )
+
+    # 3. Verify that inconsistency is detected on restart/verification
+    is_valid, err_id = await audit.verify_integrity()
+    assert is_valid is False
+    assert err_id == 3  # Checkpoint is at 3, but database has 4 records
+
+    # 4. Confirm system did NOT silently regenerate the checkpoint
+    cp_valid, cp_data, _ = audit.read_checkpoint()
+    assert cp_valid is True
+    assert cp_data["last_sequence_id"] == 3  # Still sequence 3!
+
+    # 5. Confirm historical audit records remain fully recoverable for investigation
+    rows = await test_db.execute_read("SELECT id, action, record_hash FROM audit_records ORDER BY id ASC")
+    assert len(rows) == 4
+    assert rows[3][0] == 4
+    assert rows[3][1] == "STEP_4"
+    assert rows[3][2] == hash4
+
+    # 6. Perform explicit manual recovery following investigation
+    audit.recover_checkpoint_manually(4, hash4)
+    is_valid, err_id = await audit.verify_integrity()
+    assert is_valid is True
+    assert err_id is None
+
+
+@pytest.mark.asyncio
+async def test_audit_crash_consistency_stray_temp_file_ignored(test_db, test_settings):
+    """Verify that a stray temporary file from an interrupted write does not compromise the valid checkpoint."""
+    key = b"test_key_1234567890123456789012"
+    audit = AuditLogger(test_db, settings=test_settings, key=key)
+
+    await audit.log_event("User", "STEP_1", "res", {})
+    assert (await audit.verify_integrity())[0] is True
+
+    # Create stray temp file with corrupted data (simulating power cut during NamedTemporaryFile write)
+    stray_tmp = audit.checkpoint_path.parent / "cp_interrupted.tmp"
+    stray_tmp.write_bytes(b"corrupted partial write")
+
+    # Read checkpoint and verify integrity should still succeed from the real atomic checkpoint
+    cp_valid, cp_data, _ = audit.read_checkpoint()
+    assert cp_valid is True
+    assert cp_data["last_sequence_id"] == 1
+
+    is_valid, err_id = await audit.verify_integrity()
+    assert is_valid is True
+    assert err_id is None
+
+    # Clean up stray temp file
+    if stray_tmp.exists():
+        stray_tmp.unlink()
+
+
+@pytest.mark.asyncio
+async def test_audit_missing_checkpoint_with_records_fails_closed(test_db, test_settings):
+    """Verify that if database records exist but checkpoint is deleted/missing, verification fails closed."""
+    key = b"test_key_1234567890123456789012"
+    audit = AuditLogger(test_db, settings=test_settings, key=key)
+
+    await audit.log_event("User", "STEP_1", "res", {})
+    assert (await audit.verify_integrity())[0] is True
+
+    # Delete checkpoint
+    audit.checkpoint_path.unlink()
+    assert not audit.checkpoint_path.exists()
+
+    is_valid, err_id = await audit.verify_integrity()
+    assert is_valid is False
+    assert err_id == 1  # Last database record ID
+

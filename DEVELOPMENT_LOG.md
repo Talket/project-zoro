@@ -41,7 +41,26 @@
 
 ---
 
-## Session 3: Milestone 1 Final Security Hardening & Acceptance
+## Session 4: Job Object Security Audit, Unnamed Job Architecture & Audit Crash Consistency
+
+### Timestamp: 2026-11-15 22:55 IST
+- **Objective**: Conduct deep final security audit of `Local\ZoroJobObject`, eliminate named-job handle retention vulnerabilities, verify audit checkpoint crash consistency, and correct threat-model claims.
+- **Empirical Security Findings & Technical Solutions**:
+  1. *Named Job Object Access & Multi-Handle `KILL_ON_JOB_CLOSE` Failure*:
+     - Querying Win32 security info revealed the default DACL on `Local\ZoroJobObject`: `(A;;0x1f003f;;;S-1-5-21-...-1001)`, granting Full Control (`JOB_OBJECT_ALL_ACCESS`) to any process running under the owner's account.
+     - Live process testing confirmed: an external same-user process could call `OpenJobObjectW` with `JOB_OBJECT_SET_ATTRIBUTES` and clear `LimitFlags = 0`, or retain an open handle.
+     - Critical Windows NT kernel behavior confirmed: `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` terminates contained processes *only when the last handle to the job object is closed*. When an external process held a handle, supervisor termination did NOT terminate the child processes!
+     - Solution: Re-architected `WindowsJobObject` to be **UNNAMED** (`name=None`) by default. Unnamed Job Objects have no name in the Object Manager (`OpenJobObjectW` returns error 87 `ERROR_INVALID_PARAMETER`), and handle inheritance is disabled (`HANDLE_FLAG_INHERIT=0`). Only the supervisor holds a handle; when the supervisor terminates, `KILL_ON_JOB_CLOSE` is guaranteed to fire unconditionally.
+  2. *Audit Checkpoint Crash Consistency Verification*:
+     - Verified scenario where crash occurs after SQLite write commit but before checkpoint replacement (`db_last_id > cp_seq`): `verify_integrity()` detects the mismatch and fails closed.
+     - Confirmed that the runtime **never silently regenerates** the checkpoint. Historical records in SQLite remain intact and recoverable for forensic auditing.
+     - Verified that stray temporary files (`cp_*.tmp`) from interrupted writes do not corrupt or invalidate the real atomic checkpoint.
+     - Added `AuditLogger.recover_checkpoint_manually()` for explicit authorized owner recovery.
+  3. *Threat Model Corrections*:
+     - Updated `SECURITY.md` and `ARCHITECTURE.md`: removed cold-boot claims; documented that DPAPI protects key material at rest but does not isolate secrets from code executing in the same user session; distinguished direct process tree containment from external brokered tasks (COM, WMI, Task Scheduler).
+  4. *Regression Verification*:
+     - Suite expanded to **76 automated tests** across **16 modules**, all passing in **9.54s** with **86% coverage** on the Windows 11 host.
+- **Milestone 1 Final Closure**: COMPLETE and empirically verified. Ready for Milestone 2 authorization.
 
 ### Timestamp: 2026-11-15 22:20 IST
 - **Objective**: Execute final security hardening for Milestone 1 acceptance, addressing four specific review findings without advancing to Milestone 2.
