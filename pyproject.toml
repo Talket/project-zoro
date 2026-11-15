@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zoro"
+version = "0.1.0"
+description = "PROJECT ZORO: Autonomous Personal Artificial Intelligence"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "Proprietary / Open Research"}
+authors = [
+    {name = "ZORO Architecture Group"}
+]
+dependencies = [
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+    "aiosqlite>=0.20.0",
+    "PySide6>=6.8.0",
+    "psutil>=6.1.0",
+    "colorama>=0.4.6",
+    "pyyaml>=6.0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+]
+
+[project.scripts]
+zoro = "zoro.__main__:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--strict-markers -v"
+
+[tool.coverage.run]
+source = ["zoro"]
+omit = ["tests/*", "scripts/*", "benchmarks/*"]
