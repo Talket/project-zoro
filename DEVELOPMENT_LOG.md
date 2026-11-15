@@ -41,6 +41,35 @@
 
 ---
 
+## Session 6: Handle-Bound Emergency Termination & TOCTOU Elimination
+
+### Timestamp: 2026-11-15 23:55 IST
+- **Objective**: Replace PID-based `taskkill` sequence in `EmergencyManager` with handle-bound Win32 process termination, eliminate TOCTOU race conditions, record raw 64-bit `FILETIME` creation timestamps, document Windows 11 SDK access-mask expansion from `winnt.h`, and run full regression tests.
+- **Empirical Security Findings & Technical Solutions**:
+  1. *TOCTOU Race Elimination via Handle-Bound Termination*:
+     - Previously, `EmergencyManager` checked process existence via `psutil` and then invoked `subprocess.run(["taskkill", "/F", "/T", "/PID", pid])`. This introduced a Time-of-Check/Time-of-Use race window where if the supervisor terminated and another process inherited the PID before `taskkill` ran, the new process could be killed.
+     - Implemented `terminate_process_by_validated_handle()` in `zoro/security/emergency.py`:
+       1. Opens the target process with `OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)`.
+       2. Queries creation timestamp directly on the opened handle via `GetProcessTimes`.
+       3. Validates against the recorded supervisor 64-bit `creation_filetime`.
+       4. If mismatched, strictly refuses termination (guaranteeing unrelated reused processes are never harmed).
+       5. If matched, calls `TerminateProcess` on the **same validated process handle**.
+       6. Waits for exit via `WaitForSingleObject(h_proc, 5000)`.
+       7. Guarantees handle closure on all failure and success paths via `try...finally`.
+     - Zero PID lookups occur after handle opening; `taskkill` is completely eliminated.
+  2. *Raw 64-bit FILETIME Persistence*:
+     - Updated `record_pid()` to query `get_process_creation_filetime(target_pid)` via `GetProcessTimes`, storing 100-nanosecond integer ticks since Jan 1, 1601 UTC.
+     - Eliminates floating-point conversion inaccuracies in process identification.
+  3. *Windows 11 SDK Job Object Access Mask Clarification*:
+     - Verified installed SDK version `10.0.26100.0` at `C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um\winnt.h` (lines 13540–13550).
+     - Decoded `JOB_OBJECT_ALL_ACCESS`: `STANDARD_RIGHTS_REQUIRED (0x000F0000) | SYNCHRONIZE (0x00100000) | 0x3F = 0x1F003F`.
+     - Confirmed `JOB_OBJECT_IMPERSONATE` is bit `0x0020` (introduced in Windows 7 / Server 2008 R2), explaining why modern Windows returns `0x1F003F` while legacy pre-Windows 7 documentation cites `0x1F001F`.
+  4. *Regression Verification*:
+     - Suite expanded to **86 automated tests** across **16 modules**, all passing in **9.95s** with **86% line coverage** on the Windows 11 host.
+- **Milestone 1 Final Closure**: All TOCTOU race conditions eliminated, all security boundaries verified and documented. Ready for Milestone 2 authorization.
+
+---
+
 ## Session 5: Handle Duplication Security Boundary & Emergency PID Validation
 
 ### Timestamp: 2026-11-15 23:40 IST

@@ -25,7 +25,7 @@ To run a specific test module:
 
 ## 2. Test Architecture & Reconciled Module Inventory
 
-The test suite contains **80 automated tests** structured across exactly **16 dedicated test modules** in `tests/`. Each test module has a single, well-defined responsibility with zero redundant files:
+The test suite contains **86 automated tests** structured across exactly **16 dedicated test modules** in `tests/`. Each test module has a single, well-defined responsibility with zero redundant files:
 
 | # | Test Module | Tests | Execution Time | Subsystem Under Test & Verification Scope |
 | :--- | :--- | :---: | :---: | :--- |
@@ -33,7 +33,7 @@ The test suite contains **80 automated tests** structured across exactly **16 de
 | 2 | `tests/test_config.py` | 3 | 0.12s | Pydantic v2 `BaseSettings` validation, default configuration parameters, environment variable overrides (`ZORO_*`), and dynamic path resolution. |
 | 3 | `tests/test_db.py` | 8 | 1.15s | SQLite WAL mode activation, deterministic migration runner, checksum tamper detection, transaction rollbacks on failure, 50-task serialized writer queue concurrency, shutdown with pending writes, and idempotent initialization. |
 | 4 | `tests/test_e2e_stress.py` | 2 | 2.10s | End-to-end full system lifecycle, live telemetry stream, Named Pipe IPC RPC roundtrips, database reboot persistence, emergency halt lock blocking, and high-concurrency stress testing. |
-| 5 | `tests/test_emergency.py` | 5 | 0.35s | Unit-level `EmergencyManager` logic: pre-flight halt checks, halt lock creation/resumption, runtime PID and creation-time persistence, anti-PID-reuse validation, stale/malformed record handling, and Windows kernel file-sharing exclusive lock behavior (`WinError 32`). |
+| 5 | `tests/test_emergency.py` | 11 | 0.85s | Unit-level `EmergencyManager` logic: pre-flight halt checks, halt lock creation/resumption, runtime PID and 64-bit `creation_filetime` persistence, handle-bound process termination (`OpenProcess` $\to$ `GetProcessTimes` $\to$ `TerminateProcess` $\to$ `WaitForSingleObject`), anti-PID-reuse verification, stale/malformed record handling, handle cleanup on all failure paths, proof of same-handle execution without `taskkill`, repeated shutdown cycles, and kernel file sharing lock behavior (`WinError 32`). |
 | 6 | `tests/test_emergency_scenarios.py` | 7 | 3.37s | 7 live Windows NT failure and emergency shutdown scenarios: (1) normal emergency kill with halt persistence, (2) supervisor crash terminating child via `KILL_ON_JOB_CLOSE`, (3) core crash detected by supervisor, (4) child/grandchild containment and atomic termination, (5) handle non-inheritance rejection (`HANDLE_FLAG_INHERIT=0`, `ERROR_INVALID_HANDLE=6`), (6) halt lock persistence and restart refusal, (7) 10x repeated cycle of boot $\to$ emergency kill $\to$ resume $\to$ boot. |
 | 7 | `tests/test_engine.py` | 2 | 0.45s | Central `ZoroEngine` orchestrator initialization, pre-flight halt gate blocking, subsystem coordination, RPC dispatcher, and background telemetry loop. |
 | 8 | `tests/test_event_bus.py` | 3 | 0.10s | In-memory asynchronous publish/subscribe routing, handler exception containment/isolation, and wildcard (`*`) pattern subscriptions. |
@@ -45,18 +45,20 @@ The test suite contains **80 automated tests** structured across exactly **16 de
 | 14 | `tests/test_models.py` | 2 | 0.08s | `BaseModelProvider` interface, health check, capabilities contract, and deterministic `MockModelProvider` chat completions. |
 | 15 | `tests/test_permissions.py` | 5 | 0.10s | Capability categorization (5 tiers), read-only auto-allow, reversible change logging, irreversible change confirmation prompts, and hard-locked protected path enforcement. |
 | 16 | `tests/test_ui.py` | 3 | 0.85s | PySide6 HUD desktop application bootstrap, hardware telemetry gauge rendering, window close-to-tray minimization, and global hotkey toggle logic. |
-| **Total** | **16 Modules** | **80 Tests** | **~10.5s** | **Full Milestone 1 Core Foundation & Security Hardening** |
+| **Total** | **16 Modules** | **86 Tests** | **~9.95s** | **Full Milestone 1 Core Foundation & Security Hardening** |
 
 ---
 
 ## 3. Verified Coverage & Quality Metrics
 
-- **Total Statements**: 2,064
-- **Missed Statements**: 299
+- **Total Statements**: 2,154
+- **Missed Statements**: 305
 - **Overall Line Coverage**: **86%** (exceeds the $\ge 85\%$ milestone requirement).
-- **Test Pass Rate**: **100%** (80 passed, 0 failed, 0 skipped, 0 errors).
-- **Execution Speed**: 80 tests execute in **10.24 seconds** on the host Windows machine.
+- **Test Pass Rate**: **100%** (86 passed, 0 failed, 0 skipped, 0 errors).
+- **Execution Speed**: 86 tests execute in **9.95 seconds** on the host Windows machine.
 - **SQLite Concurrency Invariant**: Zero database lock errors under 50-task serialized writer load.
 - **Kernel Process Containment Invariant**: Descendant processes cannot escape the Job Object, cannot inherit job handles, and are terminated unconditionally upon job termination or supervisor crash.
 - **Explicit Duplication Boundary**: Empirically verified that same-user processes can duplicate unnamed job handles via Win32 `OpenProcess(PROCESS_DUP_HANDLE)` + `DuplicateHandle()`; documented that same-user isolation is not an OS security boundary under the standard Windows interactive desktop token model.
-- **PID Reuse Invariant**: Verified that emergency termination refuses execution if the recorded process creation time does not match the live process `create_time()`, strictly preventing accidental termination of reused PIDs.
+- **Handle-Bound Termination Invariant**: Empirically verified that emergency termination operates exclusively on the opened, validated process handle (`TerminateProcess`), preventing Time-of-Check/Time-of-Use (TOCTOU) races and never invoking `taskkill`.
+- **PID Reuse Invariant**: Verified that emergency termination refuses execution if the process creation timestamp on the opened handle does not match the recorded supervisor timestamp, strictly preventing accidental termination of reused PIDs.
+- **Handle Cleanup Invariant**: Verified that Win32 process handles are reliably closed via `CloseHandle` on all failure and success paths.

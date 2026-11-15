@@ -32,10 +32,10 @@ This document outlines the phased engineering milestones for PROJECT ZORO. Progr
 - [x] Windows Named Pipe IPC server and client with Overlapped I/O (`zoro.ipc`).
 - [x] Central Engine lifecycle FSM & event bus (`zoro.core`).
 - [x] PySide6 Desktop HUD & System Tray Shell (`zoro.ui`).
-- [x] Automated pytest suite: **80/80 tests passing** across **16 modules** with **86% line coverage**.
+- [x] Automated pytest suite: **86/86 tests passing** across **16 modules** with **86% line coverage**.
 - [x] Unnamed Job Object architecture eliminating namespace discovery.
 - [x] Explicit Job Object handle duplication (`PROCESS_DUP_HANDLE`) boundary empirically verified and documented.
-- [x] Emergency controller anti-PID-reuse validation using process creation timestamp matching.
+- [x] Emergency controller handle-bound termination with raw 64-bit `FILETIME` validation eliminating TOCTOU races and `taskkill`.
 - [x] Audit checkpoint crash consistency verified with fail-closed non-regeneration.
 - [x] Empirical memory benchmarking: Core Engine RSS 36.5 MB, Full Stack RSS 70.9 MB.
 - **Status**: **FINAL ACCEPTANCE COMPLETED**

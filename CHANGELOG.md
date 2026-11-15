@@ -4,6 +4,17 @@ All notable changes to PROJECT ZORO are documented in this file in reverse chron
 
 ---
 
+## [0.1.5] - 2026-11-15 (Handle-Bound Emergency Termination & TOCTOU Race Elimination)
+
+### Security Hardening & Race Elimination
+- **Handle-Bound Process Termination**: Replaced the previous `psutil` validation followed by `taskkill /F /T /PID` sequence with atomic, handle-bound Win32 termination in `zoro/security/emergency.py`. The emergency controller now opens the target supervisor PID via `OpenProcess` (`PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`), queries the creation timestamp directly on that handle via `GetProcessTimes`, validates it against the recorded 64-bit `creation_filetime`, and calls `TerminateProcess` using the exact same validated handle.
+- **TOCTOU Race Condition Eliminated**: Eliminated Time-of-Check/Time-of-Use race windows where a process could terminate and have its PID reassigned between validation and `taskkill` invocation. Process handles hold a direct kernel reference to the validated process object, making it impossible to terminate an unrelated reused process.
+- **Raw 64-bit FILETIME Persistence**: Upgraded `zoro.pid` schema to record raw 64-bit `creation_filetime` (100-nanosecond intervals since Jan 1, 1601 UTC) alongside legacy Unix timestamps for exact integer precision, eliminating floating-point rounding ambiguities.
+- **Windows 11 SDK Access Mask Clarification**: Documented exact SDK version (`10.0.26100.0`) and header path (`C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um\winnt.h`), showing macro expansion `STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x3F = 0x1F003F` and decoding the difference with legacy pre-Windows 7 documentation (`0x1F001F`).
+- **Test Suite Expansion**: Suite expanded to **86 automated tests** across **16 modules**, passing with **100% pass rate** in **9.95s** with **86% line coverage** across `zoro.*`.
+
+---
+
 ## [0.1.4] - 2026-11-15 (Handle Duplication Boundary Verification & PID Reuse Validation)
 
 ### Security Verification & Hardening

@@ -45,38 +45,54 @@ Process containment is managed via the Win32 Job Object API (`zoro/security/job_
    - If a malicious process retains this duplicated handle, the Job Object reference count remains $\ge 1$, preventing `KILL_ON_JOB_CLOSE` from terminating child processes when the supervisor dies until the duplicated handle is also closed.
    - Process DACLs cannot prevent this between processes sharing the same Windows SID, because the user token is the owner of the process object and inherently retains `WRITE_DAC` rights. True isolation against arbitrary same-user malware requires separate security principals (e.g. running the supervisor under a dedicated Windows Service), which is outside standard user-mode desktop execution.
 
-### 2.2 Emergency Shutdown Mechanism & Anti-PID-Reuse Protection
+### 2.2 Emergency Shutdown Mechanism & Handle-Bound Process Termination
 
-Emergency shutdown operates through a coordinated sequence:
+Emergency shutdown operates through a deterministic, race-free sequence:
 
 1. **Independent Invocation**: `scripts/emergency_kill.py` can be executed from a desktop shortcut (`emergency_kill.bat`) or shell.
 2. **Execution Sequence**:
    - **Step 1: Write Halt Lock**: Writes the emergency halt state to `%PROGRAMDATA%\Zoro\Security\halt.lock` (or repository data directory).
-   - **Step 2: PID & Process Creation Timestamp Validation**:
-     - Reads the supervisor PID and process creation timestamp from `zoro.pid`.
-     - Validates the target process via `EmergencyManager.validate_target_process()`.
-     - **Anti-PID-Reuse Guard**: If Windows has recycled the PID for an unrelated process, the process creation timestamp will not match. The controller detects this and **strictly refuses termination**, logging a warning and preventing accidental damage to unrelated applications.
-     - Safely handles missing, empty, or malformed PID records without crashing.
-   - **Step 3: Terminate Supervisor Process**: Terminates the validated supervisor process tree via `taskkill /F /T /PID <pid>`.
-   - **Step 4: Kernel Job Object Termination**: Terminating the supervisor closes its handle to the unnamed Job Object. The Windows NT kernel immediately executes `KILL_ON_JOB_CLOSE`, killing all contained processes.
-   - **Step 5: Cleanup**: Clears runtime PID records.
+   - **Step 2: Handle-Bound Termination (Elimination of TOCTOU Races)**:
+     - Reads the supervisor PID and 64-bit `creation_filetime` from `zoro.pid`.
+     - Opens the process using Win32 `OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)`.
+     - Queries the process creation timestamp on that **exact open handle** via `GetProcessTimes`.
+     - Compares the handle creation `FILETIME` against the recorded supervisor `creation_filetime`.
+     - **Anti-PID-Reuse Guard**: If Windows reallocated the PID to an unrelated process before `OpenProcess`, `GetProcessTimes` detects the timestamp mismatch. Termination is **strictly refused**, completely protecting unrelated host applications.
+     - **Handle-Bound Execution**: If timestamps match, `TerminateProcess` is called directly on the **same validated process handle**. The process is never closed and reopened, and PID-based utilities (such as `taskkill`) are never invoked, eliminating Time-of-Check/Time-of-Use (TOCTOU) races.
+     - Waits for termination confirmation via `WaitForSingleObject(h_proc, 5000)`.
+     - All handles are reliably closed via `try...finally` on every failure and success path.
+   - **Step 3: Kernel Job Object Termination**: Terminating the supervisor closes its handle to the unnamed Job Object. The Windows NT kernel immediately executes `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, killing all contained child processes.
+   - **Step 4: Cleanup**: Clears runtime PID records.
 3. **Fail-Closed Pre-flight Boot Gate**:
    - `ZoroEngine.initialize()` and `zoro.__main__` check for `halt.lock` before initializing any subsystem.
    - If `halt.lock` exists, startup aborts immediately with exit code 1.
    - Resumption requires explicitly running `python scripts/emergency_kill.py --resume` or `scripts/resume_zoro.bat`.
 
-### 2.3 Win32 Access Mask Reference (Modern Windows SDK)
+### 2.3 Win32 Access Mask Reference (Windows 11 SDK Verification)
 
-The Job Object access rights are defined in `winnt.h`:
-- `JOB_OBJECT_ASSIGN_PROCESS (0x0001)`: Assign processes to the job.
-- `JOB_OBJECT_SET_ATTRIBUTES (0x0002)`: Set job limits and flags.
-- `JOB_OBJECT_QUERY (0x0004)`: Query accounting and limits.
-- `JOB_OBJECT_TERMINATE (0x0008)`: Terminate all processes in the job.
-- `JOB_OBJECT_SET_SECURITY_ATTRIBUTES (0x0010)`: Set security attributes.
-- `JOB_OBJECT_IMPERSONATE (0x0020)`: Added in Windows 7 / Server 2008 R2 (the 0x20 bit).
-- `STANDARD_RIGHTS_REQUIRED (0x000F0000)` & `SYNCHRONIZE (0x00100000)`.
-- **Modern SDK `JOB_OBJECT_ALL_ACCESS`**: `0x001F003F` (includes `0x0020` impersonation flag).
-- **Legacy SDK `JOB_OBJECT_ALL_ACCESS`**: `0x001F001F` (pre-Windows 7 headers).
+The Job Object access rights are defined in the modern Windows SDK:
+- **Verified SDK Version**: Windows 11 SDK `10.0.26100.0`.
+- **Verified Header Path**: `C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um\winnt.h` (lines 13540–13550).
+- **Exact Win32 SDK Definitions**:
+  ```c
+  #define JOB_OBJECT_ASSIGN_PROCESS           (0x0001)
+  #define JOB_OBJECT_SET_ATTRIBUTES           (0x0002)
+  #define JOB_OBJECT_QUERY                    (0x0004)
+  #define JOB_OBJECT_TERMINATE                (0x0008)
+  #define JOB_OBJECT_SET_SECURITY_ATTRIBUTES  (0x0010)
+  #define JOB_OBJECT_IMPERSONATE              (0x0020)
+  #define JOB_OBJECT_ALL_ACCESS       (STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | \
+                                          0x3F )
+  ```
+- **Macro Expansion**:
+  - `STANDARD_RIGHTS_REQUIRED = 0x000F0000` (`DELETE | READ_CONTROL | WRITE_DAC | WRITE_OWNER`)
+  - `SYNCHRONIZE = 0x00100000`
+  - Specific rights bitmask: `0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0010 | 0x0020 = 0x003F`
+  - Total `JOB_OBJECT_ALL_ACCESS`: `0x000F0000 | 0x00100000 | 0x003F = 0x1F003F`.
+- **Documentation Discrepancy Clarification**:
+  - Legacy Microsoft Learn / MSDN documentation tables describe `JOB_OBJECT_ALL_ACCESS` as `0x1F001F` because pre-Windows 7 SDKs only defined flags through `0x0010` (`0x1F`).
+  - Windows 7 and Windows Server 2008 R2 introduced `JOB_OBJECT_IMPERSONATE (0x0020)` in `winnt.h` to manage security context impersonation inside a job. This expanded the specific rights mask from `0x1F` to `0x3F`, resulting in `0x1F003F`.
+  - The runtime value returned by `GetSecurityInfo` (`0x1F003F`) matches the modern SDK macro expansion identically.
 
 ---
 

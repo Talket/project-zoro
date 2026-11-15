@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +14,162 @@ from zoro.config.paths import default_paths
 from zoro.security.job_object import WindowsJobObject
 
 logger = logging.getLogger(__name__)
+
+# Win32 Process Access Flags
+PROCESS_TERMINATE: int = 0x0001
+PROCESS_QUERY_LIMITED_INFORMATION: int = 0x1000
+SYNCHRONIZE: int = 0x00100000
+EMERGENCY_PROCESS_ACCESS: int = (
+    PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+)  # 0x00101001
+
+WAIT_OBJECT_0: int = 0x00000000
+WAIT_TIMEOUT: int = 0x00000102
+WAIT_FAILED: int = 0xFFFFFFFF
+
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    class FILETIME(ctypes.Structure):
+        _fields_ = [
+            ("dwLowDateTime", wintypes.DWORD),
+            ("dwHighDateTime", wintypes.DWORD),
+        ]
+
+    _KERNEL32 = None
+
+    def _get_kernel32():
+        global _KERNEL32
+        if _KERNEL32 is None:
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            k32.OpenProcess.restype = wintypes.HANDLE
+            k32.GetProcessTimes.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(FILETIME),
+                ctypes.POINTER(FILETIME),
+                ctypes.POINTER(FILETIME),
+                ctypes.POINTER(FILETIME),
+            ]
+            k32.GetProcessTimes.restype = wintypes.BOOL
+            k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+            k32.TerminateProcess.restype = wintypes.BOOL
+            k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            k32.WaitForSingleObject.restype = wintypes.DWORD
+            k32.CloseHandle.argtypes = [wintypes.HANDLE]
+            k32.CloseHandle.restype = wintypes.BOOL
+            _KERNEL32 = k32
+        return _KERNEL32
+
+
+def get_process_creation_filetime(pid: int) -> Optional[int]:
+    """
+    Retrieve the 64-bit raw FILETIME process creation timestamp on Windows.
+    Returns 100-nanosecond intervals since Jan 1, 1601 (UTC).
+    """
+    if os.name != "nt":
+        return None
+    try:
+        k32 = _get_kernel32()
+        h_proc = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h_proc:
+            return None
+        try:
+            ct, et, kt, ut = FILETIME(), FILETIME(), FILETIME(), FILETIME()
+            if k32.GetProcessTimes(
+                h_proc,
+                ctypes.byref(ct),
+                ctypes.byref(et),
+                ctypes.byref(kt),
+                ctypes.byref(ut),
+            ):
+                return (ct.dwHighDateTime << 32) | ct.dwLowDateTime
+            return None
+        finally:
+            k32.CloseHandle(h_proc)
+    except Exception as e:
+        logger.debug("Failed to query process creation FILETIME for PID %d: %s", pid, e)
+        return None
+
+
+def terminate_process_by_validated_handle(
+    pid: int,
+    expected_filetime: Optional[int],
+    exit_code: int = 137,
+    timeout_ms: int = 5000,
+) -> Tuple[bool, str]:
+    """
+    Execute handle-bound process termination with kernel timestamp validation.
+
+    Guarantees elimination of TOCTOU race conditions:
+    1. Open the recorded PID with:
+       - PROCESS_TERMINATE (0x0001)
+       - PROCESS_QUERY_LIMITED_INFORMATION (0x1000)
+       - SYNCHRONIZE (0x00100000)
+    2. Query process creation FILETIME directly on that opened handle.
+    3. Compare against expected_filetime.
+    4. If timestamps mismatch, refuse termination (guards against PID reuse).
+    5. If matched, call TerminateProcess on the SAME validated handle.
+    6. Wait for process termination via WaitForSingleObject.
+    7. Ensure handle is closed reliably in finally block.
+    """
+    if os.name != "nt":
+        return False, "Handle-bound termination requires Windows NT."
+    if pid <= 0:
+        return False, f"Invalid PID {pid}."
+
+    k32 = _get_kernel32()
+    h_proc = k32.OpenProcess(EMERGENCY_PROCESS_ACCESS, False, pid)
+    if not h_proc:
+        err = ctypes.get_last_error()
+        return False, f"OpenProcess failed for PID {pid}: WinError {err}"
+
+    try:
+        ct, et, kt, ut = FILETIME(), FILETIME(), FILETIME(), FILETIME()
+        if not k32.GetProcessTimes(
+            h_proc,
+            ctypes.byref(ct),
+            ctypes.byref(et),
+            ctypes.byref(kt),
+            ctypes.byref(ut),
+        ):
+            err = ctypes.get_last_error()
+            return False, f"GetProcessTimes failed for PID {pid}: WinError {err}"
+
+        actual_filetime = (ct.dwHighDateTime << 32) | ct.dwLowDateTime
+
+        if expected_filetime is not None:
+            # Check for timestamp match. Tolerance of 5_000_000 (500ms) for clock rounding if converted from Unix float.
+            # For exact FILETIME match, diff is 0.
+            diff = abs(actual_filetime - expected_filetime)
+            if diff > 5_000_000:
+                return False, (
+                    f"PID reuse detected! Process handle creation FILETIME ({actual_filetime}) "
+                    f"does not match recorded supervisor FILETIME ({expected_filetime}). "
+                    f"Refusing termination to protect unrelated host process."
+                )
+
+        # Terminate through the SAME validated process handle
+        if not k32.TerminateProcess(h_proc, exit_code):
+            err = ctypes.get_last_error()
+            # If process was already terminated/terminating:
+            wait_res = k32.WaitForSingleObject(h_proc, 500)
+            if wait_res == WAIT_OBJECT_0:
+                return True, f"Process PID {pid} was already terminating and has exited."
+            return False, f"TerminateProcess failed for PID {pid}: WinError {err}"
+
+        # Wait for termination via WaitForSingleObject on the same handle
+        wait_res = k32.WaitForSingleObject(h_proc, timeout_ms)
+        if wait_res == WAIT_OBJECT_0:
+            return True, f"Process PID {pid} terminated and reaped successfully via validated handle."
+        elif wait_res == WAIT_TIMEOUT:
+            return False, f"WaitForSingleObject timed out ({timeout_ms}ms) waiting for PID {pid} to terminate."
+        else:
+            err = ctypes.get_last_error()
+            return False, f"WaitForSingleObject failed on PID {pid}: result {wait_res}, WinError {err}"
+    finally:
+        k32.CloseHandle(h_proc)
 
 
 class EmergencyManager:
@@ -37,27 +192,29 @@ class EmergencyManager:
             return True, {"reason": "Corrupted or manual halt lockfile present."}
 
     def record_pid(self, pid: Optional[int] = None) -> None:
-        """Record the active runtime PID and creation timestamp to prevent PID reuse."""
+        """Record the active runtime PID and 64-bit creation FILETIME to prevent PID reuse."""
         target_pid = pid or os.getpid()
-        create_time: Optional[float] = None
+        creation_filetime = get_process_creation_filetime(target_pid)
+        create_time_unix: Optional[float] = None
         try:
             import psutil
-            create_time = float(psutil.Process(target_pid).create_time())
+            create_time_unix = float(psutil.Process(target_pid).create_time())
         except Exception as e:
-            logger.debug("Could not query process creation time for PID %d: %s", target_pid, e)
+            logger.debug("Could not query Unix create_time for PID %d: %s", target_pid, e)
 
         record_data = {
             "pid": target_pid,
-            "create_time": create_time,
+            "creation_filetime": creation_filetime,
+            "create_time": create_time_unix,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         }
         self.pid_path.parent.mkdir(parents=True, exist_ok=True)
         self.pid_path.write_text(json.dumps(record_data, indent=2), encoding="utf-8")
 
-    def get_recorded_pid_info(self) -> Tuple[Optional[int], Optional[float]]:
+    def get_recorded_pid_info(self) -> Tuple[Optional[int], Optional[int]]:
         """
-        Retrieve the recorded runtime PID and creation timestamp.
-        Safely handles missing, malformed, empty, or legacy plain-integer files.
+        Retrieve the recorded runtime PID and 64-bit creation FILETIME.
+        Safely handles missing, malformed, empty, legacy float, or plain-integer files.
         """
         if not self.pid_path.exists():
             return None, None
@@ -68,11 +225,15 @@ class EmergencyManager:
             if content.startswith("{"):
                 data = json.loads(content)
                 pid = data.get("pid")
+                creation_filetime = data.get("creation_filetime")
+                if creation_filetime is not None:
+                    return int(pid), int(creation_filetime)
+                # Fallback from legacy float create_time
                 create_time = data.get("create_time")
-                return (
-                    int(pid) if pid is not None else None,
-                    float(create_time) if create_time is not None else None,
-                )
+                if create_time is not None:
+                    converted_ft = int((float(create_time) + 11644473600.0) * 10000000)
+                    return int(pid), converted_ft
+                return int(pid) if pid is not None else None, None
             # Legacy plain integer string fallback
             return int(content), None
         except Exception as e:
@@ -84,29 +245,46 @@ class EmergencyManager:
         pid, _ = self.get_recorded_pid_info()
         return pid
 
-    def validate_target_process(self, pid: int, expected_create_time: Optional[float]) -> Tuple[bool, str]:
+    def validate_target_process(self, pid: int, expected_filetime: Optional[int]) -> Tuple[bool, str]:
         """
-        Validate whether the given PID is still the intended process.
-        Guards against Windows PID reuse: if a process exited and the OS assigned its PID
-        to an unrelated application, creation time verification prevents killing the wrong process.
+        Validate whether the given PID is still the intended process without terminating it.
+        Guards against Windows PID reuse.
         """
+        if os.name != "nt":
+            return False, "Process validation requires Windows NT."
+        if pid <= 0:
+            return False, f"Invalid PID {pid}."
+
+        k32 = _get_kernel32()
+        h_proc = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h_proc:
+            err = ctypes.get_last_error()
+            return False, f"Process PID {pid} does not exist or access denied (WinError {err})."
+
         try:
-            import psutil
-            if not psutil.pid_exists(pid):
-                return False, f"Process PID {pid} does not exist (already terminated)."
-            proc = psutil.Process(pid)
-            if expected_create_time is not None:
-                actual_create_time = proc.create_time()
-                # 0.5s tolerance for clock granularity / float rounding
-                if abs(actual_create_time - expected_create_time) > 0.5:
+            ct, et, kt, ut = FILETIME(), FILETIME(), FILETIME(), FILETIME()
+            if not k32.GetProcessTimes(
+                h_proc,
+                ctypes.byref(ct),
+                ctypes.byref(et),
+                ctypes.byref(kt),
+                ctypes.byref(ut),
+            ):
+                err = ctypes.get_last_error()
+                return False, f"GetProcessTimes failed for PID {pid} (WinError {err})."
+
+            actual_filetime = (ct.dwHighDateTime << 32) | ct.dwLowDateTime
+            if expected_filetime is not None:
+                diff = abs(actual_filetime - expected_filetime)
+                if diff > 5_000_000:
                     return False, (
-                        f"PID reuse detected! Recorded PID {pid} creation time was {expected_create_time}, "
-                        f"but active process creation time is {actual_create_time}. "
+                        f"PID reuse detected! Recorded FILETIME was {expected_filetime}, "
+                        f"but active process creation FILETIME is {actual_filetime}. "
                         "Refusing to terminate unrelated process."
                     )
             return True, f"Process PID {pid} validated."
-        except Exception as e:
-            return False, f"Process validation error for PID {pid}: {e}"
+        finally:
+            k32.CloseHandle(h_proc)
 
     def clear_pid(self) -> None:
         """Remove the PID record on normal shutdown."""
@@ -121,7 +299,7 @@ class EmergencyManager:
         Execute emergency kill:
         1. Write protected halt lockfile.
         2. Terminate Windows Job Object if named.
-        3. Validated process tree termination via taskkill with PID reuse protection.
+        3. Handle-bound process termination via validated process handle (no taskkill, no TOCTOU).
         """
         logger.critical("EMERGENCY KILL TRIGGERED: %s", reason)
 
@@ -142,25 +320,19 @@ class EmergencyManager:
         if WindowsJobObject.JOB_OBJECT_DEFAULT_NAME:
             WindowsJobObject.terminate_named_job(name=WindowsJobObject.JOB_OBJECT_DEFAULT_NAME, exit_code=137)
 
-        # 3. Validated Process Tree Termination via taskkill
-        target_pid, expected_create_time = self.get_recorded_pid_info()
+        # 3. Handle-bound Process Termination via validated Win32 handle
+        target_pid, expected_filetime = self.get_recorded_pid_info()
         if target_pid and os.name == "nt":
-            is_valid, validation_msg = self.validate_target_process(target_pid, expected_create_time)
-            if is_valid:
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(target_pid)],
-                        capture_output=True,
-                        check=False,
-                    )
-                    logger.info("Executed taskkill on process tree for validated PID %d", target_pid)
-                except Exception as e:
-                    logger.error("Failed to execute taskkill: %s", e)
+            success, msg = terminate_process_by_validated_handle(
+                target_pid,
+                expected_filetime,
+                exit_code=137,
+                timeout_ms=5000,
+            )
+            if success:
+                logger.info("Emergency handle-bound termination succeeded: %s", msg)
             else:
-                logger.warning(
-                    "Emergency kill skipped process termination to prevent accidental damage: %s",
-                    validation_msg,
-                )
+                logger.warning("Emergency handle-bound termination refused or failed: %s", msg)
 
         self.clear_pid()
         return True
@@ -184,3 +356,4 @@ class EmergencyManager:
         except Exception as e:
             logger.error("Failed to remove halt lock: %s", e)
             return False
+
