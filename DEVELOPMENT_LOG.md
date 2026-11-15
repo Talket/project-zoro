@@ -41,6 +41,38 @@
 
 ---
 
+## Session 5: Handle Duplication Security Boundary & Emergency PID Validation
+
+### Timestamp: 2026-11-15 23:40 IST
+- **Objective**: Empirically verify explicit Job Object handle duplication boundaries from same-user processes, correct Win32 access mask discrepancies, implement anti-PID-reuse emergency validation, and execute final regression verification.
+- **Empirical Security Findings & Technical Solutions**:
+  1. *Explicit Handle Duplication Boundary Verification*:
+     - Unnamed Job Objects successfully prevent namespace discovery via `OpenJobObjectW`, but do NOT prevent handle duplication if an external process runs under the same user token.
+     - Live testing demonstrated that a same-user process can call `kernel32.OpenProcess(PROCESS_DUP_HANDLE=0x0040, False, supervisor_pid)` (succeeds, error 0) and `kernel32.DuplicateHandle(proc, job_handle, cur_proc, byref(dup), 0, False, DUPLICATE_SAME_ACCESS=0x0002)` (succeeds, error 0).
+     - Confirmed kernel behavior: when the duplicated handle remains open and the supervisor is terminated, `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` does NOT kill contained child processes because the kernel Job Object reference count remains $\ge 1$. Once the duplicated handle is closed, the child process is terminated immediately.
+     - Conclusion documented honestly in `SECURITY.md`: Windows desktop processes under the same user token share ownership of the desktop and processes. Same-user isolation cannot be guaranteed by process DACLs because the user token possesses `WRITE_DAC` rights. True isolation requires separate security principals (e.g. Windows Service under `LocalSystem`), which violates interactive desktop and zero-cost constraints.
+  2. *Win32 Access Mask Discrepancy Decoded*:
+     - Investigated discrepancy between legacy `0x1F001F` and modern `0x1F003F`.
+     - Bit `0x0020` is `JOB_OBJECT_IMPERSONATE` from modern `winnt.h` (introduced in Windows 7 / Server 2008 R2).
+     - Defined explicit symbolic constants in `zoro/security/job_object.py`:
+       - `JOB_OBJECT_ASSIGN_PROCESS = 0x0001`
+       - `JOB_OBJECT_SET_ATTRIBUTES = 0x0002`
+       - `JOB_OBJECT_QUERY = 0x0004`
+       - `JOB_OBJECT_TERMINATE = 0x0008` (corrected from typo `0x0001`)
+       - `JOB_OBJECT_SET_SECURITY_ATTRIBUTES = 0x0010`
+       - `JOB_OBJECT_IMPERSONATE = 0x0020`
+       - `JOB_OBJECT_ALL_ACCESS = 0x1F003F`
+       - `JOB_OBJECT_ALL_ACCESS_LEGACY = 0x1F001F`
+  3. *Emergency Controller Anti-PID-Reuse Protection*:
+     - Hardened `EmergencyManager.record_pid()` to store JSON: `{"pid": int, "create_time": float, "recorded_at": float}`.
+     - Implemented `validate_target_process()` checking `abs(actual_create_time - recorded_create_time) <= 0.5s`.
+     - In `trigger_emergency_kill()`: if the PID exists but creation time does not match, the kill operation is **strictly refused**, preventing termination of an unrelated host process that inherited the PID after a supervisor crash.
+  4. *Regression Verification*:
+     - Suite expanded to **80 automated tests** across **16 modules**, all passing in **10.24s** with **86% line coverage** on the Windows 11 host.
+- **Milestone 1 Final Closure**: Complete and empirically verified. Ready for Milestone 2 authorization.
+
+---
+
 ## Session 4: Job Object Security Audit, Unnamed Job Architecture & Audit Crash Consistency
 
 ### Timestamp: 2026-11-15 22:55 IST

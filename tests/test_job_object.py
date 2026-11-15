@@ -168,13 +168,13 @@ def test_named_job_object_same_user_access_proof():
         assert h_query is not None
         kernel32.CloseHandle(h_query)
 
-        # Same-user process can open with JOB_OBJECT_TERMINATE (0x1)
-        h_term = kernel32.OpenJobObjectW(0x0001, False, job_name)
+        # Same-user process can open with JOB_OBJECT_TERMINATE (0x8)
+        h_term = kernel32.OpenJobObjectW(0x0008, False, job_name)
         assert h_term is not None
         kernel32.CloseHandle(h_term)
 
-        # Same-user process can open with JOB_OBJECT_ALL_ACCESS (0x1F001F)
-        h_all = kernel32.OpenJobObjectW(0x1F001F, False, job_name)
+        # Same-user process can open with modern JOB_OBJECT_ALL_ACCESS (0x1F003F)
+        h_all = kernel32.OpenJobObjectW(0x1F003F, False, job_name)
         assert h_all is not None
         kernel32.CloseHandle(h_all)
     finally:
@@ -206,5 +206,116 @@ def test_unnamed_job_object_kill_on_close_unconditional():
         if child.poll() is None:
             child.kill()
             child.wait()
+
+
+def test_job_object_explicit_handle_duplication_boundary():
+    """
+    Empirical verification of the exact Win32 security boundary for handle duplication:
+    1. An external process under the same user token CAN call OpenProcess(PROCESS_DUP_HANDLE).
+    2. DuplicateHandle succeeds, transferring the unnamed Job Object handle.
+    3. The retained duplicated handle keeps the Job Object reference count > 0.
+    4. When the supervisor terminates, KILL_ON_JOB_CLOSE does NOT fire while the handle is retained.
+    5. When the external duplicated handle is closed, KILL_ON_JOB_CLOSE terminates the child.
+    """
+    if os.name != "nt":
+        return
+
+    import ctypes
+    from ctypes import wintypes
+    import psutil
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.DuplicateHandle.restype = wintypes.BOOL
+    kernel32.DuplicateHandle.argtypes = [
+        wintypes.HANDLE, wintypes.HANDLE, wintypes.HANDLE,
+        ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, wintypes.BOOL, wintypes.DWORD
+    ]
+
+    PROCESS_DUP_HANDLE = 0x0040
+    DUPLICATE_SAME_ACCESS = 0x00000002
+
+    # Supervisor code creates unnamed job, assigns child, reports PID and handle
+    supervisor_code = """
+import ctypes, subprocess, sys, time, os
+from ctypes import wintypes
+kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+
+job = kernel32.CreateJobObjectW(None, None)
+
+class IO_COUNTERS(ctypes.Structure):
+    _fields_ = [('r_ops', ctypes.c_uint64), ('w_ops', ctypes.c_uint64), ('o_ops', ctypes.c_uint64), ('r_tx', ctypes.c_uint64), ('w_tx', ctypes.c_uint64), ('o_tx', ctypes.c_uint64)]
+class BASIC_LIMIT(ctypes.Structure):
+    _fields_ = [('p_user', ctypes.c_int64), ('j_user', ctypes.c_int64), ('LimitFlags', wintypes.DWORD), ('min_ws', ctypes.c_size_t), ('max_ws', ctypes.c_size_t), ('active_lim', wintypes.DWORD), ('affinity', ctypes.c_size_t), ('priority', wintypes.DWORD), ('sched', wintypes.DWORD)]
+class EXT_LIMIT(ctypes.Structure):
+    _fields_ = [('Basic', BASIC_LIMIT), ('Io', IO_COUNTERS), ('p_mem', ctypes.c_size_t), ('j_mem', ctypes.c_size_t), ('peak_p_mem', ctypes.c_size_t), ('peak_j_mem', ctypes.c_size_t)]
+
+info = EXT_LIMIT()
+info.Basic.LimitFlags = 0x2000
+kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info))
+
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+h_proc = kernel32.OpenProcess(0x1F0FFF, False, child.pid)
+kernel32.AssignProcessToJobObject(job, h_proc)
+kernel32.CloseHandle(h_proc)
+
+print(f'SUP:{os.getpid()}:JOB:{int(job)}:CHILD:{child.pid}', flush=True)
+
+while True:
+    time.sleep(0.1)
+"""
+
+    sup = subprocess.Popen([sys.executable, "-c", supervisor_code], stdout=subprocess.PIPE, text=True)
+    try:
+        line = sup.stdout.readline().strip()
+        parts = line.split(":")
+        sup_pid = int(parts[1])
+        job_val = int(parts[3])
+        child_pid = int(parts[5])
+
+        # Step 1: OpenProcess with PROCESS_DUP_HANDLE
+        h_sup_proc = kernel32.OpenProcess(PROCESS_DUP_HANDLE, False, sup_pid)
+        assert h_sup_proc is not None and h_sup_proc != 0
+
+        # Step 2: DuplicateHandle into current process
+        h_dup = wintypes.HANDLE()
+        dup_success = kernel32.DuplicateHandle(
+            h_sup_proc,
+            wintypes.HANDLE(job_val),
+            kernel32.GetCurrentProcess(),
+            ctypes.byref(h_dup),
+            0,
+            False,
+            DUPLICATE_SAME_ACCESS,
+        )
+        assert bool(dup_success) is True
+        assert h_dup.value is not None
+
+        # Step 3: Terminate supervisor while retaining duplicated handle
+        sup.terminate()
+        sup.wait(timeout=5)
+
+        time.sleep(0.4)
+        # Child MUST be alive because h_dup is still holding the job object open!
+        assert psutil.pid_exists(child_pid)
+
+        # Step 4: Close the duplicated handle
+        kernel32.CloseHandle(h_dup)
+        time.sleep(0.4)
+
+        # Now that the LAST handle is closed, child MUST be terminated!
+        assert not psutil.pid_exists(child_pid)
+        kernel32.CloseHandle(h_sup_proc)
+    finally:
+        if sup.poll() is None:
+            sup.kill()
+        if psutil.pid_exists(child_pid):
+            try:
+                psutil.Process(child_pid).kill()
+            except Exception:
+                pass
 
 

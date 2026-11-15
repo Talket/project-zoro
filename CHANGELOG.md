@@ -4,6 +4,16 @@ All notable changes to PROJECT ZORO are documented in this file in reverse chron
 
 ---
 
+## [0.1.4] - 2026-11-15 (Handle Duplication Boundary Verification & PID Reuse Validation)
+
+### Security Verification & Hardening
+- **Empirical Handle Duplication Boundary Verification**: Conducted live Win32 API testing of explicit Job Object handle duplication from external processes under the same Windows user token. Empirically demonstrated that `OpenProcess(PROCESS_DUP_HANDLE)` (handle value, err `0`) and `DuplicateHandle` (ret `1`, err `0`) succeed against same-user processes under the Windows NT interactive desktop model. Proved that retaining a duplicated handle holds the Job Object open after supervisor termination, preventing `KILL_ON_JOB_CLOSE` until that external handle closes. Documented the true OS boundary honestly in `SECURITY.md`: same-user processes sharing a logon token cannot be cryptographically isolated without separate Windows security principals or service isolation.
+- **Win32 Job Object Access Mask Discrepancy Correction**: Decoded the difference between legacy Windows SDK access mask `0x1F001F` and modern Windows 11 SDK access mask `0x1F003F`. Identified bit `0x0020` as `JOB_OBJECT_IMPERSONATE` (introduced in Windows 7 / Server 2008 R2). Defined explicit symbolic constants in `zoro/security/job_object.py` and documented the bitmask decomposition in `SECURITY.md`.
+- **Emergency Controller PID Reuse Protection**: Hardened `EmergencyManager` against Windows PID reuse. `record_pid()` now serializes a JSON payload containing `pid`, `create_time` (`psutil.Process(pid).create_time()`), and `recorded_at`. `validate_target_process()` and `trigger_emergency_kill()` strictly verify process creation time (`abs(actual - expected) <= 0.5s`) before executing termination; if the process does not exist or creation time differs (PID was reused by another process), termination is strictly refused to protect unrelated host applications.
+- **Test Suite Expansion**: Suite expanded to **80 automated tests** across **16 modules**, passing with **100% pass rate** in **10.24s** with **86% line coverage** across `zoro.*`.
+
+---
+
 ## [0.1.3] - 2026-11-15 (Job Object Re-Architecture & Audit Crash Consistency)
 
 ### Fixed

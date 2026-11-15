@@ -39,21 +39,44 @@ Process containment is managed via the Win32 Job Object API (`zoro/security/job_
 4. **Scope of Process Containment**:
    - **Contained**: All direct child, grandchild, and descendant processes created via Win32 `CreateProcess` or Python `subprocess.Popen` are automatically assigned to the Job Object.
    - **Not Contained (Brokered Execution)**: Processes launched through external operating system brokers or RPC services (e.g., scheduled tasks via `schtasks.exe`, COM objects via `CoCreateInstance`, or WMI process creation) execute outside the caller's process tree and are NOT assigned to the Job Object unless an external monitor explicitly captures their PIDs.
+5. **Explicit Handle Duplication Security Boundary**:
+   - While an unnamed Job Object cannot be opened by name (`OpenJobObjectW` fails with `ERROR_INVALID_PARAMETER`), any malicious process executing under the **same Windows user identity** has `PROCESS_ALL_ACCESS` or `PROCESS_DUP_HANDLE` rights against other same-user processes.
+   - Empirical tests prove that a same-user process can call `OpenProcess(PROCESS_DUP_HANDLE)` against the supervisor and call `DuplicateHandle` to duplicate the supervisor's unnamed Job Object handle into its own handle table.
+   - If a malicious process retains this duplicated handle, the Job Object reference count remains $\ge 1$, preventing `KILL_ON_JOB_CLOSE` from terminating child processes when the supervisor dies until the duplicated handle is also closed.
+   - Process DACLs cannot prevent this between processes sharing the same Windows SID, because the user token is the owner of the process object and inherently retains `WRITE_DAC` rights. True isolation against arbitrary same-user malware requires separate security principals (e.g. running the supervisor under a dedicated Windows Service), which is outside standard user-mode desktop execution.
 
-### 2.2 Emergency Shutdown Mechanism
+### 2.2 Emergency Shutdown Mechanism & Anti-PID-Reuse Protection
 
 Emergency shutdown operates through a coordinated sequence:
 
 1. **Independent Invocation**: `scripts/emergency_kill.py` can be executed from a desktop shortcut (`emergency_kill.bat`) or shell.
 2. **Execution Sequence**:
    - **Step 1: Write Halt Lock**: Writes the emergency halt state to `%PROGRAMDATA%\Zoro\Security\halt.lock` (or repository data directory).
-   - **Step 2: Terminate Supervisor Process**: Reads the supervisor PID from `zoro.pid` and terminates it via `taskkill /F /T /PID <pid>`.
-   - **Step 3: Kernel Job Object Termination**: Terminating the supervisor closes the sole handle to the unnamed Job Object. The Windows NT kernel immediately executes `KILL_ON_JOB_CLOSE`, killing all processes in the job tree.
-   - **Step 4: Cleanup**: Clears runtime PID records.
+   - **Step 2: PID & Process Creation Timestamp Validation**:
+     - Reads the supervisor PID and process creation timestamp from `zoro.pid`.
+     - Validates the target process via `EmergencyManager.validate_target_process()`.
+     - **Anti-PID-Reuse Guard**: If Windows has recycled the PID for an unrelated process, the process creation timestamp will not match. The controller detects this and **strictly refuses termination**, logging a warning and preventing accidental damage to unrelated applications.
+     - Safely handles missing, empty, or malformed PID records without crashing.
+   - **Step 3: Terminate Supervisor Process**: Terminates the validated supervisor process tree via `taskkill /F /T /PID <pid>`.
+   - **Step 4: Kernel Job Object Termination**: Terminating the supervisor closes its handle to the unnamed Job Object. The Windows NT kernel immediately executes `KILL_ON_JOB_CLOSE`, killing all contained processes.
+   - **Step 5: Cleanup**: Clears runtime PID records.
 3. **Fail-Closed Pre-flight Boot Gate**:
    - `ZoroEngine.initialize()` and `zoro.__main__` check for `halt.lock` before initializing any subsystem.
    - If `halt.lock` exists, startup aborts immediately with exit code 1.
    - Resumption requires explicitly running `python scripts/emergency_kill.py --resume` or `scripts/resume_zoro.bat`.
+
+### 2.3 Win32 Access Mask Reference (Modern Windows SDK)
+
+The Job Object access rights are defined in `winnt.h`:
+- `JOB_OBJECT_ASSIGN_PROCESS (0x0001)`: Assign processes to the job.
+- `JOB_OBJECT_SET_ATTRIBUTES (0x0002)`: Set job limits and flags.
+- `JOB_OBJECT_QUERY (0x0004)`: Query accounting and limits.
+- `JOB_OBJECT_TERMINATE (0x0008)`: Terminate all processes in the job.
+- `JOB_OBJECT_SET_SECURITY_ATTRIBUTES (0x0010)`: Set security attributes.
+- `JOB_OBJECT_IMPERSONATE (0x0020)`: Added in Windows 7 / Server 2008 R2 (the 0x20 bit).
+- `STANDARD_RIGHTS_REQUIRED (0x000F0000)` & `SYNCHRONIZE (0x00100000)`.
+- **Modern SDK `JOB_OBJECT_ALL_ACCESS`**: `0x001F003F` (includes `0x0020` impersonation flag).
+- **Legacy SDK `JOB_OBJECT_ALL_ACCESS`**: `0x001F001F` (pre-Windows 7 headers).
 
 ---
 
