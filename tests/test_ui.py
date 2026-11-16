@@ -1,6 +1,9 @@
 """Tests for PySide6 Desktop HUD, System Tray, and UI Application."""
 
 import os
+import threading
+import time
+from unittest.mock import MagicMock, patch
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent
@@ -151,4 +154,66 @@ def test_main_window_intelligence_controls(qapp, test_settings):
     # 7. Test cancel button
     win.btn_cancel.click()
     assert any(c[0] == "ai.cancel" for c in handled_calls)
+
+    # 8. Test Computer Control UI widgets (Milestone 03)
+    win.combo_profile.setCurrentText("PROFILE_C_RESTRICTED_MODIFICATION")
+    assert any(c[0] == "computer.set_profile" for c in handled_calls)
+
+    win.btn_capture.click()
+    assert any(c[0] == "computer.capture_screen" for c in handled_calls)
+
+    win.btn_ocr.click()
+    assert any(c[0] == "computer.ocr_screen" for c in handled_calls)
+
+    win.btn_windows.click()
+    assert any(c[0] == "computer.list_windows" for c in handled_calls)
+
+
+def test_ui_ipc_worker_notifications_and_tray(qapp, test_settings):
+    """Verify IpcWorkerThread notification forwarding and system tray interactions."""
+    app = ZoroDesktopApp(settings=test_settings)
+    worker = app.ipc_worker
+
+    # Notification handlers forwarding to signals
+    worker._on_telemetry("telemetry.update", {"cpu_percent": 10})
+    worker._on_ai_state("ai.state_changed", {"new_state": "IDLE"})
+    worker._on_approval_requested("ai.approval_requested", {"token": "test-token"})
+    worker._on_step_update("ai.step_update", {"description": "Running tool"})
+
+    # Tray activation
+    from PySide6.QtWidgets import QSystemTrayIcon
+    app._on_tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
+    assert app.window.isVisible()
+    app._on_tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
+    assert not app.window.isVisible()
+
+    app._toggle_window()
+    assert app.window.isVisible()
+
+    worker.stop()
+
+
+def test_ui_ipc_worker_run_and_exit_app(qapp, test_settings):
+    """Verify IpcWorkerThread run loop connection and app exit."""
+    app = ZoroDesktopApp(settings=test_settings)
+    worker = app.ipc_worker
+
+    # Mock client connection loop
+    with patch.object(worker.client, "is_connected", side_effect=[False, True]), \
+         patch.object(worker.client, "connect", return_value=True), \
+         patch.object(worker.client, "send_request", return_value={"ok": True}):
+        
+        def stop_soon():
+            time.sleep(0.05)
+            worker.stop()
+        
+        t = threading.Thread(target=stop_soon)
+        t.start()
+        worker.run()
+        t.join()
+
+    # Test exit_app
+    with patch.object(app.app, "quit"):
+        app.exit_app()
+
 

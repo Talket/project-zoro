@@ -146,3 +146,39 @@ PROJECT ZORO is engineered as an autonomous personal intelligence designed to ru
 - Milestone 02 Intelligence Controls: Provider dropdown, model selector, real-time AI state badge (`IDLE`, `PLANNING`, `WAITING_FOR_APPROVAL`, `EXECUTING`), directive input prompt with dispatch button, cancel button, and one-click benchmark execution button.
 - Real-Time Approval Dialog: Prompts user to Approve or Reject sensitive operations when paused by the orchestrator.
 - Minimizable to Windows System Tray with global context menu.
+
+### 3.11 Windows Computer Control & Execution Sandbox (`zoro.computer`)
+- **Windows UI Automation Engine (`zoro.computer.ui`)**:
+  - `WindowManager`: Enumeration and manipulation of top-level Win32 windows (`list_windows`, `find_window`, `focus_window`, `minimize_window`, `maximize_window`, `restore_window`, `close_window`, `move_resize_window`, `is_hung` via `IsHungAppWindow`).
+  - `UIElementInspector`: UIA accessibility inspection via `pywinauto` backend (`inspect_window_elements`, `list_elements`, `find_element`). Extracts control types, automation IDs, bounding rectangles, enabled/focused states.
+  - `UIElementInteractor`: Safe pattern interaction (`invoke` for buttons/hyperlinks, `set_value` for edit fields, `toggle` for checkboxes, `select` for radio buttons and combo items).
+  - `KeyboardController` & `MouseController`: Smooth cursor positioning, left/right/double clicks, drags, mouse wheel scrolling, and simulated keystrokes.
+  - `CoordinateFallbackInteractor`: Fallback for non-standard canvas/DirectX controls. Enforces screen bounding checks and mandatory pre-action screen verification callbacks before dispatching mouse clicks.
+  - `UIVerificationEngine`: Realizes the Observe-Act-Verify loop. Evaluates post-action state changes (`verify_window_opened`, `verify_window_closed`, `verify_element_text`, `verify_element_exists`, `verify_element_vanished`).
+- **Screen Capture & Computer Perception (`zoro.computer.vision`)**:
+  - `ScreenCaptureManager`: Multi-monitor screen capture using `mss`, active window cropping via Win32 `GetWindowRect`, and headless Session 0 fallback canvas generation. Automated 15-minute retention cleanup (`cleanup_old_screenshots`).
+  - `WindowsOCR`: 100% offline, zero-dependency native Windows OCR using WinRT `Windows.Media.Ocr.OcrEngine` invoked via PowerShell .NET runtime (`WindowsRuntimeSystemExtensions.AsTask`). Extracts full text and bounding boxes for every detected word.
+  - `VisionModelInterface`: Multi-modal screen interpretation using local Ollama vision models (e.g. `llava`, `minicpm-v`) with graceful offline OCR fallback.
+- **Secure Filesystem Agent (`zoro.computer.filesystem`)**:
+  - `PathSecurityValidator`: Strictly enforces canonical path resolution (`resolve()`), permitted workspace boundaries, directory traversal rejection (`..`, `...`), reparse-point / junction / symlink escape prevention, and hard blocks on sensitive security files (`audit.key`, `emergency.lock`, `zoro.pid`, `audit.checkpoint`) and Windows system directories (`System32`, `SysWOW64`, `Windows`).
+  - `SecureFilesystemAgent`: File listing, reading with 50 MB limits, atomic writing, copying, moving, and safe deletion to the Windows Recycle Bin via Win32 `SHFileOperationW` (`FO_DELETE` with `FOF_ALLOWUNDO`).
+- **Controlled Shell Execution (`zoro.computer.shell`)**:
+  - `CommandRiskPolicy`: Tiers shell commands into `TIER_1_SAFE`, `TIER_2_MODERATE`, `TIER_3_ELEVATED`, and `TIER_4_BLOCKED`. Maintains executable allowlist and structural token parser (`shlex.split(posix=False)`). Rejects dangerous chaining characters (`&`, `|`, `;`, `>`, `<`, backticks).
+  - `CommandRunner`: Executes commands in child processes assigned to the containment Job Object. Restricts working directories to permitted workspace paths, enforces execution timeouts, and truncates output captures to 1 MB.
+  - `ProcessMonitor`: Lists running processes with CPU and RAM tracking, hung GUI window detection, and safe process termination protecting supervisor PIDs.
+- **Application Discovery & Control (`zoro.computer.apps`)**:
+  - `ApplicationRegistry`: Discovers installed software across 32-bit and 64-bit Windows Registry Uninstall keys (`HKLM` and `HKCU`) and Start Menu directories, supplemented by built-in Windows accessories (`notepad`, `calc`, `mspaint`, `cmd`, `powershell`, `explorer`).
+  - `ApplicationLauncher`: Spawns processes assigned to Windows Job Object containment and awaits main window presentation (`WaitForInputIdle` and polling).
+  - `ApplicationController`: Manages window focus, minimize, maximize, restore, and safe termination.
+- **Execution Sandbox & Resource Governance (`zoro.computer.sandbox`)**:
+  - `ExecutionPolicyEngine`: 4 execution profiles:
+    - `Profile A (Read-Only)`: Only discovery, listing, read-only file access, and screenshot capture permitted.
+    - `Profile B (Standard)`: UI automation and moderate filesystem actions permitted. Destructive actions and elevated shell blocked.
+    - `Profile C (Restricted Modification)`: Elevated shell and sensitive file operations require single-use user approval.
+    - `Profile D (High-Risk)`: Full access with mandatory human-in-the-loop authorization on all modifying actions.
+  - `ResourceGovernor`: Sliding-window screenshot rate limiting, task concurrency slots, CPU/RAM threshold guarding.
+  - `SandboxManager`: Comprehensive session management logging all computer sessions, actions, shell executions, and screenshot metadata to SQLite (`computer_sessions`, `computer_actions`, `shell_executions`, `screenshot_metadata`).
+- **Central Tool Registry Integration (`zoro.tools.builtin.computer_tools`)**:
+  - Registers 9 builtin computer tools: `WindowListTool`, `WindowFocusTool`, `ScreenCaptureTool`, `ScreenOCRTool`, `ElementInspectTool`, `ElementActionTool`, `ShellExecuteTool`, `AppLaunchTool`, `AppCloseTool`.
+- **Desktop HUD Integration**:
+  - Adds dedicated Computer Control & Sandbox Panel with profile selector, screenshot capture, offline OCR trigger, and window listing.

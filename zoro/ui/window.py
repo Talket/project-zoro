@@ -170,6 +170,36 @@ class ZoroMainWindow(QMainWindow):
 
         main_layout.addWidget(directive_group)
 
+        # 4b. Computer Control & Desktop Automation Panel (Milestone 03)
+        computer_group = QGroupBox("COMPUTER CONTROL & EXECUTION SANDBOX", self)
+        comp_layout = QHBoxLayout(computer_group)
+        comp_layout.setSpacing(10)
+
+        comp_layout.addWidget(QLabel("SANDBOX PROFILE:", self))
+        self.combo_profile = QComboBox(self)
+        self.combo_profile.addItems([
+            "PROFILE_B_STANDARD",
+            "PROFILE_A_READ_ONLY",
+            "PROFILE_C_RESTRICTED_MODIFICATION",
+            "PROFILE_D_HIGH_RISK",
+        ])
+        self.combo_profile.currentTextChanged.connect(self._on_profile_changed)
+        comp_layout.addWidget(self.combo_profile)
+
+        self.btn_capture = QPushButton("Capture Screen", self)
+        self.btn_capture.clicked.connect(self._on_capture_screen_clicked)
+        comp_layout.addWidget(self.btn_capture)
+
+        self.btn_ocr = QPushButton("Screen OCR", self)
+        self.btn_ocr.clicked.connect(self._on_screen_ocr_clicked)
+        comp_layout.addWidget(self.btn_ocr)
+
+        self.btn_windows = QPushButton("List Windows", self)
+        self.btn_windows.clicked.connect(self._on_list_windows_clicked)
+        comp_layout.addWidget(self.btn_windows)
+
+        main_layout.addWidget(computer_group)
+
         # 5. Interactive Human-in-the-Loop Approval Box (Hidden until needed)
         self.approval_group = QGroupBox("SECURITY AUTHORIZATION REQUIRED", self)
         self.approval_group.setStyleSheet("QGroupBox { border: 2px solid #ffaa00; background-color: #1e1910; }")
@@ -330,6 +360,42 @@ class ZoroMainWindow(QMainWindow):
         self.append_log("[CRITICAL] EMERGENCY KILL BUTTON PRESSED BY USER.")
         self.status_pill.setText("HALTED // KILL ACTIVATED")
         self.emergency_mgr.trigger_emergency_kill("Emergency button in Desktop HUD pressed.")
+
+    def _on_profile_changed(self, profile_name: str) -> None:
+        self.append_log(f"[Sandbox] Switching profile to {profile_name}...")
+        if self.ipc_call_handler:
+            res = self.ipc_call_handler("computer.set_profile", {"profile": profile_name})
+            if res and res.get("success"):
+                self.append_log(f"[Sandbox] Active profile set to {res.get('profile')}")
+
+    def _on_capture_screen_clicked(self) -> None:
+        self.append_log("[Perception] Requesting desktop screen capture...")
+        if self.ipc_call_handler:
+            res = self.ipc_call_handler("computer.capture_screen", {})
+            if res and res.get("success"):
+                self.append_log(f"[Screen Capture] Saved: {res.get('image_path')} ({res.get('width')}x{res.get('height')})")
+            elif res:
+                self.append_log(f"[Screen Capture Error] {res.get('error')}")
+
+    def _on_screen_ocr_clicked(self) -> None:
+        self.append_log("[Perception] Running WinRT Screen OCR...")
+        if self.ipc_call_handler:
+            res = self.ipc_call_handler("computer.ocr_screen", {})
+            if res and res.get("success"):
+                txt = (res.get("text") or "").strip()
+                preview = txt[:200] + ("..." if len(txt) > 200 else "")
+                self.append_log(f"[OCR Result] Extracted text ({len(res.get('words', []))} words):\n{preview}")
+            elif res:
+                self.append_log(f"[OCR Error] {res.get('error')}")
+
+    def _on_list_windows_clicked(self) -> None:
+        self.append_log("[UI Automation] Querying active desktop windows...")
+        if self.ipc_call_handler:
+            res = self.ipc_call_handler("computer.list_windows", {"visible_only": True})
+            if res and "windows" in res:
+                wins = res["windows"][:5]
+                summary = ", ".join([f"'{w.get('title')}' ({w.get('handle')})" for w in wins if w.get("title")])
+                self.append_log(f"[Windows ({len(res['windows'])})] Top active: {summary}")
 
     def closeEvent(self, event) -> None:
         event.ignore()

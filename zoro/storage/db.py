@@ -118,6 +118,10 @@ class DatabaseManager:
         await self._write_queue.put((query, params, "single", future))
         return await future
 
+    async def execute(self, query: str, params: Tuple[Any, ...] = ()) -> Dict[str, Any]:
+        """Convenience alias for execute_write."""
+        return await self.execute_write(query, params)
+
     async def execute_write_many(self, query: str, params_seq: List[Tuple[Any, ...]]) -> Dict[str, Any]:
         """Submit an executemany write query to the serialized write actor and await completion."""
         if not self._accepting_writes:

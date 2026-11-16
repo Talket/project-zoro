@@ -223,7 +223,15 @@ def test_scenario_7_repeated_boot_kill_resume_cycle(tmp_path: Path):
             proc.wait(timeout=5)
 
             # 3. Assert dead and halted
-            assert not psutil.pid_exists(proc.pid)
+            assert proc.poll() is not None
+            # Allow brief moment for Windows process table reap
+            dead = False
+            for _ in range(30):
+                if not psutil.pid_exists(proc.pid):
+                    dead = True
+                    break
+                time.sleep(0.05)
+            assert dead is True, f"Process {proc.pid} still exists in psutil after wait"
             assert mgr.is_halted()[0] is True
 
             # 4. Resume

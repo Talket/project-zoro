@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from zoro.benchmarks.runner import HardwareAwareBenchmarkRunner
@@ -25,6 +26,33 @@ from zoro.security.audit import AuditLogger
 from zoro.security.emergency import EmergencyManager
 from zoro.security.permissions import PermissionGate
 from zoro.storage.db import DatabaseManager
+from zoro.computer.apps import ApplicationController, ApplicationLauncher, ApplicationRegistry
+from zoro.computer.filesystem import PathSecurityValidator, SecureFilesystemAgent
+from zoro.computer.filesystem.models import FileRiskTier
+from zoro.computer.sandbox import ExecutionPolicyEngine, ExecutionProfile, ExecutionSandboxManager
+from zoro.computer.sandbox.resource_limits import ResourceGovernor as ComputerResourceGovernor
+from zoro.computer.shell import CommandPolicy, CommandRiskTier, ControlledCommandRunner, ProcessMonitor
+from zoro.computer.ui import (
+    CoordinateFallbackInteractor,
+    KeyboardController,
+    MouseController,
+    UIElementInspector,
+    UIElementInteractor,
+    UIVerificationEngine,
+    WindowManager,
+)
+from zoro.computer.vision import ScreenCaptureManager, ScreenRegion, VisionModelInterface, WindowsOCR
+from zoro.tools.builtin.computer_tools import (
+    AppCloseTool,
+    AppLaunchTool,
+    ElementActionTool,
+    ElementInspectTool,
+    ScreenCaptureTool,
+    ScreenOCRTool,
+    ShellExecuteTool,
+    WindowFocusTool,
+    WindowListTool,
+)
 from zoro.tools.builtin.file_tools import (
     FileDeleteTool,
     FileDiscoveryTool,
@@ -64,7 +92,6 @@ class ZoroEngine:
             audit=self.audit,
             permission_gate=self.permissions,
         )
-        self._register_default_tools()
 
         # 2. AI Provider Registry & Adapters
         self.provider_registry = ProviderRegistry()
@@ -96,16 +123,60 @@ class ZoroEngine:
             emergency_mgr=self.emergency_mgr,
         )
 
+        # ---------------------------------------------------------
+        # Computer Control Subsystems (Milestone 03)
+        # ---------------------------------------------------------
+        self.window_mgr = WindowManager()
+        self.element_inspector = UIElementInspector()
+        self.element_interactor = UIElementInteractor(self.element_inspector)
+        self.keyboard = KeyboardController()
+        self.mouse = MouseController()
+        self.coordinate_fallback = CoordinateFallbackInteractor(self.mouse)
+        self.capture_mgr = ScreenCaptureManager()
+        self.ocr_engine = WindowsOCR()
+        self.vision_provider = VisionModelInterface(ocr_engine=self.ocr_engine)
+        self.path_validator = PathSecurityValidator(
+            allowed_roots=[Path.cwd(), self.settings.data_dir, self.settings.data_dir.parent]
+        )
+        self.filesystem_agent = SecureFilesystemAgent(self.path_validator)
+        self.command_policy = CommandPolicy()
+        self.command_runner = ControlledCommandRunner(self.command_policy)
+        self.process_monitor = ProcessMonitor(supervisor_pid=None)
+        self.app_registry = ApplicationRegistry()
+        self.app_launcher = ApplicationLauncher(self.app_registry, self.window_mgr)
+        self.app_controller = ApplicationController(self.window_mgr, self.process_monitor)
+        self.execution_policy = ExecutionPolicyEngine()
+        self.comp_governor = ComputerResourceGovernor()
+        self.sandbox_manager = ExecutionSandboxManager(
+            db=self.db,
+            policy=self.execution_policy,
+            governor=self.comp_governor,
+        )
+        self.ui_verification = UIVerificationEngine(self.window_mgr, self.element_inspector)
+        self._register_default_tools()
+
         self._telemetry_task: Optional[asyncio.Task] = None
         self._is_initialized = False
 
     def _register_default_tools(self) -> None:
         """Register default safe system tools."""
+        # Built-in File Tools
         self.tool_registry.register(FileDiscoveryTool(self.permissions))
         self.tool_registry.register(FileReadMetadataTool(self.permissions))
         self.tool_registry.register(ReportGeneratorTool(self.permissions))
         self.tool_registry.register(FileMoveTool(self.permissions))
         self.tool_registry.register(FileDeleteTool(self.permissions))
+
+        # Milestone 03 Computer Control Tools
+        self.tool_registry.register(WindowListTool(self.window_mgr))
+        self.tool_registry.register(WindowFocusTool(self.window_mgr))
+        self.tool_registry.register(ScreenCaptureTool(self.capture_mgr))
+        self.tool_registry.register(ScreenOCRTool(self.capture_mgr, self.ocr_engine))
+        self.tool_registry.register(ElementInspectTool(self.element_inspector))
+        self.tool_registry.register(ElementActionTool(self.element_interactor))
+        self.tool_registry.register(ShellExecuteTool(self.command_runner))
+        self.tool_registry.register(AppLaunchTool(self.app_launcher))
+        self.tool_registry.register(AppCloseTool(self.app_controller))
 
     async def initialize(self) -> bool:
         """Run pre-flight checks and initialize all engine subsystems."""
@@ -177,6 +248,28 @@ class ZoroEngine:
         self.ipc_server.register_handler("ai.approve", self._rpc_ai_resolve_approval)
         self.ipc_server.register_handler("ai.cancel", self._rpc_ai_cancel)
         self.ipc_server.register_handler("ai.list_tools", self._rpc_ai_list_tools)
+
+        # Computer Control RPCs (Milestone 03)
+        self.ipc_server.register_handler("computer.list_windows", self._rpc_computer_list_windows)
+        self.ipc_server.register_handler("computer.focus_window", self._rpc_computer_focus_window)
+        self.ipc_server.register_handler("computer.window_action", self._rpc_computer_window_action)
+        self.ipc_server.register_handler("computer.inspect_elements", self._rpc_computer_inspect_elements)
+        self.ipc_server.register_handler("computer.element_action", self._rpc_computer_element_action)
+        self.ipc_server.register_handler("computer.mouse_action", self._rpc_computer_mouse_action)
+        self.ipc_server.register_handler("computer.keyboard_action", self._rpc_computer_keyboard_action)
+        self.ipc_server.register_handler("computer.capture_screen", self._rpc_computer_capture_screen)
+        self.ipc_server.register_handler("computer.ocr_screen", self._rpc_computer_ocr_screen)
+        self.ipc_server.register_handler("computer.list_directory", self._rpc_computer_list_directory)
+        self.ipc_server.register_handler("computer.read_file", self._rpc_computer_read_file)
+        self.ipc_server.register_handler("computer.write_file", self._rpc_computer_write_file)
+        self.ipc_server.register_handler("computer.delete_file", self._rpc_computer_delete_file)
+        self.ipc_server.register_handler("computer.shell_execute", self._rpc_computer_shell_execute)
+        self.ipc_server.register_handler("computer.list_apps", self._rpc_computer_list_apps)
+        self.ipc_server.register_handler("computer.launch_app", self._rpc_computer_launch_app)
+        self.ipc_server.register_handler("computer.close_app", self._rpc_computer_close_app)
+        self.ipc_server.register_handler("computer.get_profile", self._rpc_computer_get_profile)
+        self.ipc_server.register_handler("computer.set_profile", self._rpc_computer_set_profile)
+        self.ipc_server.register_handler("computer.get_resource_status", self._rpc_computer_get_resource_status)
 
     # ---------------------------------------------------------
     # Foundation RPC Implementations
@@ -299,6 +392,353 @@ class ZoroEngine:
 
     async def _rpc_ai_list_tools(self, params: Dict[str, Any]) -> Dict[str, Any]:
         return {"tools": self.tool_registry.list_tools()}
+
+    # ---------------------------------------------------------
+    # Computer Control RPC Implementations (Milestone 03)
+    # ---------------------------------------------------------
+    async def _rpc_computer_list_windows(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        visible_only = params.get("visible_only", True)
+        wins = self.window_mgr.list_windows(visible_only=visible_only)
+        return {
+            "windows": [
+                {
+                    "handle": w.handle,
+                    "title": w.title,
+                    "class_name": w.class_name,
+                    "pid": w.pid,
+                    "is_visible": w.is_visible,
+                    "is_hung": w.is_hung,
+                    "rect": {
+                        "left": w.rect.left,
+                        "top": w.rect.top,
+                        "width": w.rect.width,
+                        "height": w.rect.height,
+                    },
+                }
+                for w in wins
+            ]
+        }
+
+    async def _rpc_computer_focus_window(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        hwnd = params.get("handle")
+        title = params.get("title")
+        if not hwnd and title:
+            w = self.window_mgr.find_window(title=title)
+            if w:
+                hwnd = w.handle
+        if not hwnd:
+            return {"success": False, "error": "Window not found"}
+        ok = self.window_mgr.focus_window(hwnd)
+        return {"success": ok, "handle": hwnd}
+
+    async def _rpc_computer_window_action(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        hwnd = params.get("handle")
+        action = params.get("action", "").lower()
+        if not hwnd:
+            return {"success": False, "error": "Parameter 'handle' required"}
+        if action == "minimize":
+            ok = self.window_mgr.minimize_window(hwnd)
+        elif action == "maximize":
+            ok = self.window_mgr.maximize_window(hwnd)
+        elif action == "restore":
+            ok = self.window_mgr.restore_window(hwnd)
+        elif action == "close":
+            ok = self.window_mgr.close_window(hwnd)
+        else:
+            return {"success": False, "error": f"Unknown window action: {action}"}
+        return {"success": ok, "action": action, "handle": hwnd}
+
+    async def _rpc_computer_inspect_elements(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        hwnd = params.get("handle")
+        max_depth = params.get("max_depth", 3)
+        if not hwnd:
+            return {"success": False, "error": "Parameter 'handle' required"}
+        elems = self.element_inspector.list_elements(hwnd, max_depth=max_depth)
+        return {
+            "elements": [
+                {
+                    "name": e.name,
+                    "control_type": e.control_type,
+                    "automation_id": e.automation_id,
+                    "is_enabled": e.is_enabled,
+                    "rect": {
+                        "left": e.bounding_rect.left,
+                        "top": e.bounding_rect.top,
+                        "width": e.bounding_rect.width,
+                        "height": e.bounding_rect.height,
+                    }
+                    if e.bounding_rect
+                    else None,
+                }
+                for e in elems
+            ]
+        }
+
+    async def _rpc_computer_element_action(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        hwnd = params.get("handle")
+        action = params.get("action", "").lower()
+        criteria = params.get("criteria", {})
+        text_val = params.get("text")
+        if not hwnd:
+            return {"success": False, "error": "Parameter 'handle' required"}
+
+        allowed, req_app, reason = self.execution_policy.evaluate_ui_action(action)
+        if not allowed:
+            return {"success": False, "error": reason}
+
+        if action == "invoke":
+            res = self.element_interactor.invoke(hwnd, criteria)
+        elif action == "set_value":
+            res = self.element_interactor.set_value(hwnd, criteria, text_val or "")
+        elif action == "toggle":
+            res = self.element_interactor.toggle(hwnd, criteria)
+        elif action == "select":
+            res = self.element_interactor.select(hwnd, criteria)
+        else:
+            return {"success": False, "error": f"Unknown action: {action}"}
+
+        await self.sandbox_manager.record_action(
+            action_type=f"element.{action}",
+            target=str(criteria),
+            parameters=params,
+            verified=res.success,
+            error=res.error,
+        )
+        return {"success": res.success, "error": res.error}
+
+    async def _rpc_computer_mouse_action(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        action = params.get("action", "click").lower()
+        x = params.get("x")
+        y = params.get("y")
+        clicks = params.get("clicks", 1)
+        wheel = params.get("wheel", 0)
+        allowed, _, reason = self.execution_policy.evaluate_ui_action(f"mouse.{action}")
+        if not allowed:
+            return {"success": False, "error": reason}
+
+        if x is not None and y is not None:
+            self.mouse.move_to(int(x), int(y))
+        if action == "click":
+            self.mouse.click(x, y, clicks=clicks)
+        elif action == "right_click":
+            self.mouse.right_click(x, y)
+        elif action == "double_click":
+            self.mouse.double_click(x, y)
+        elif action == "scroll":
+            self.mouse.scroll(wheel)
+        return {"success": True, "action": action}
+
+    async def _rpc_computer_keyboard_action(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        text = params.get("text")
+        keys = params.get("keys")
+        allowed, _, reason = self.execution_policy.evaluate_ui_action("keyboard")
+        if not allowed:
+            return {"success": False, "error": reason}
+        if text:
+            self.keyboard.type_text(text)
+        elif keys:
+            self.keyboard.send_keys(keys)
+        return {"success": True}
+
+    async def _rpc_computer_capture_screen(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.comp_governor.check_screenshot_rate():
+            return {"success": False, "error": "Screenshot rate limit exceeded"}
+
+        mon_idx = params.get("monitor_idx", 1)
+        hwnd = params.get("handle")
+        if hwnd:
+            cap = self.capture_mgr.capture_active_window(handle=hwnd)
+        else:
+            cap = self.capture_mgr.capture_full_desktop(monitor_idx=mon_idx)
+
+        self.comp_governor.record_screenshot()
+        await self.sandbox_manager.record_screenshot_metadata(
+            file_path=cap.image_path,
+            width=cap.width,
+            height=cap.height,
+            monitor_idx=cap.monitor_idx,
+        )
+        return {
+            "success": True,
+            "image_path": str(cap.image_path),
+            "width": cap.width,
+            "height": cap.height,
+            "size_bytes": cap.file_size_bytes,
+        }
+
+    async def _rpc_computer_ocr_screen(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        img_path = params.get("image_path")
+        if not img_path:
+            cap = self.capture_mgr.capture_full_desktop()
+            img_path = str(cap.image_path)
+        res = self.ocr_engine.recognize(img_path)
+        return {
+            "success": res.success,
+            "text": res.full_text,
+            "words": [{"text": w.text, "x": w.x, "y": w.y, "w": w.width, "h": w.height} for w in res.words],
+            "error": res.error,
+        }
+
+    async def _rpc_computer_list_directory(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        dir_path = params.get("directory", str(Path.cwd()))
+        max_items = params.get("max_items", 1000)
+        try:
+            files = self.filesystem_agent.list_dir(dir_path, max_items=max_items)
+            return {
+                "success": True,
+                "files": [
+                    {
+                        "name": f.name,
+                        "path": str(f.path),
+                        "size_bytes": f.size_bytes,
+                        "is_dir": f.is_dir,
+                        "is_symlink": f.is_symlink,
+                        "is_reparse_point": f.is_reparse_point,
+                        "modified_at": f.modified_at.isoformat(),
+                    }
+                    for f in files
+                ],
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def _rpc_computer_read_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        path = params.get("path")
+        max_bytes = params.get("max_bytes")
+        if not path:
+            return {"success": False, "error": "Parameter 'path' required"}
+        try:
+            content = self.filesystem_agent.read_file(path, max_bytes=max_bytes)
+            return {"success": True, "content": content}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def _rpc_computer_write_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        path = params.get("path")
+        content = params.get("content", "")
+        overwrite = params.get("overwrite", True)
+        if not path:
+            return {"success": False, "error": "Parameter 'path' required"}
+
+        risk = FileRiskTier.SENSITIVE if Path(path).exists() else FileRiskTier.LOW_RISK
+        allowed, req_app, reason = self.execution_policy.evaluate_filesystem_action("write", risk)
+        if not allowed:
+            return {"success": False, "error": reason}
+
+        res = self.filesystem_agent.write_file(path, content, overwrite=overwrite)
+        await self.sandbox_manager.record_action(
+            action_type="file.write",
+            target=path,
+            parameters={"overwrite": overwrite, "size": len(content)},
+            risk_tier=risk.value,
+            verified=res.success,
+            error=res.error,
+        )
+        return {"success": res.success, "error": res.error}
+
+    async def _rpc_computer_delete_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        path = params.get("path")
+        recycle = params.get("to_recycle_bin", True)
+        if not path:
+            return {"success": False, "error": "Parameter 'path' required"}
+
+        allowed, req_app, reason = self.execution_policy.evaluate_filesystem_action("delete", FileRiskTier.DESTRUCTIVE)
+        if not allowed:
+            return {"success": False, "error": reason}
+
+        res = self.filesystem_agent.delete_file(path, to_recycle_bin=recycle)
+        await self.sandbox_manager.record_action(
+            action_type="file.delete",
+            target=path,
+            parameters={"recycle_bin": recycle},
+            risk_tier="DESTRUCTIVE",
+            verified=res.success,
+            error=res.error,
+        )
+        return {"success": res.success, "recycle_bin": res.recycle_bin, "error": res.error}
+
+    async def _rpc_computer_shell_execute(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        command = params.get("command")
+        timeout = params.get("timeout_seconds")
+        if not command:
+            return {"success": False, "error": "Parameter 'command' required"}
+
+        tier, reason, _ = self.command_policy.evaluate_command(command)
+        allowed, req_app, pol_reason = self.execution_policy.evaluate_shell_execution(tier)
+        if not allowed:
+            return {"success": False, "error": pol_reason or reason}
+
+        res = self.command_runner.execute(command, timeout=timeout)
+        await self.sandbox_manager.record_shell_execution(
+            command=res.command,
+            args=res.args,
+            returncode=res.returncode,
+            stdout=res.stdout,
+            stderr=res.stderr,
+            duration=res.duration_seconds,
+            risk_tier=res.risk_tier.value,
+        )
+        return {
+            "success": res.returncode == 0,
+            "returncode": res.returncode,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+            "duration_seconds": res.duration_seconds,
+            "risk_tier": res.risk_tier.value,
+            "timed_out": res.timed_out,
+            "error": res.error,
+        }
+
+    async def _rpc_computer_list_apps(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        force = params.get("refresh", False)
+        apps = self.app_registry.scan_installed_applications(force_refresh=force)
+        return {
+            "apps": [
+                {
+                    "name": a.name,
+                    "display_name": a.display_name,
+                    "executable_path": str(a.executable_path) if a.executable_path else None,
+                    "publisher": a.publisher,
+                    "version": a.version,
+                }
+                for a in apps
+            ]
+        }
+
+    async def _rpc_computer_launch_app(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        app_name = params.get("app_name")
+        if not app_name:
+            return {"success": False, "error": "Parameter 'app_name' required"}
+        ok, pid, hwnd = self.app_launcher.launch(app_name)
+        return {"success": ok, "pid": pid, "handle": hwnd}
+
+    async def _rpc_computer_close_app(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        app_target = params.get("target")
+        force = params.get("force", False)
+        if not app_target:
+            return {"success": False, "error": "Parameter 'target' required"}
+        ok = self.app_controller.close(app_target, force=force)
+        return {"success": ok, "target": app_target}
+
+    async def _rpc_computer_get_profile(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return {"profile": self.execution_policy.profile.value}
+
+    async def _rpc_computer_set_profile(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        prof_str = params.get("profile", "")
+        try:
+            prof = ExecutionProfile(prof_str)
+            self.execution_policy.set_profile(prof)
+            return {"success": True, "profile": prof.value}
+        except ValueError:
+            return {"success": False, "error": f"Invalid profile: {prof_str}"}
+
+    async def _rpc_computer_get_resource_status(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        ok, msg = self.comp_governor.check_system_health()
+        return {
+            "healthy": ok,
+            "status_message": msg,
+            "active_tasks": self.comp_governor.active_tasks_count,
+        }
 
     # ---------------------------------------------------------
     # Event Bus Handlers for Real-Time UI Broadcasting

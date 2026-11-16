@@ -28,6 +28,8 @@ $RECYCLE.BIN/
 logs/
 data/
 reports/
+screenshots/
+.zoro_cache/
 *.db-wal
 *.db-shm
 *.db
