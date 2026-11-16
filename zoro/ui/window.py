@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QGroupBox,
     QHBoxLayout,
@@ -34,6 +35,8 @@ class ZoroMainWindow(QMainWindow):
     step_update_received = Signal(dict)
     providers_received = Signal(dict)
     benchmarks_received = Signal(dict)
+    voice_state_received = Signal(dict)
+    voice_transcription_received = Signal(dict)
 
     def __init__(
         self,
@@ -58,6 +61,8 @@ class ZoroMainWindow(QMainWindow):
         self.approval_requested.connect(self.display_approval_request)
         self.step_update_received.connect(self.update_step_progress)
         self.providers_received.connect(self.update_providers)
+        self.voice_state_received.connect(self.update_voice_state)
+        self.voice_transcription_received.connect(self.update_voice_transcription)
 
     def _build_ui(self) -> None:
         central_widget = QWidget(self)
@@ -199,6 +204,50 @@ class ZoroMainWindow(QMainWindow):
         comp_layout.addWidget(self.btn_windows)
 
         main_layout.addWidget(computer_group)
+
+        # 4b. Voice Control & Audio Interaction (Milestone 04)
+        voice_group = QGroupBox("VOICE INTERACTION & AUDIO PIPELINE", self)
+        voice_layout = QVBoxLayout(voice_group)
+
+        voice_top_row = QHBoxLayout()
+        self.btn_voice_toggle = QPushButton("Enable Voice", self)
+        self.btn_voice_toggle.clicked.connect(self._on_voice_toggle_clicked)
+        voice_top_row.addWidget(self.btn_voice_toggle)
+
+        self.btn_ptt = QPushButton("Push-to-Talk", self)
+        self.btn_ptt.setStyleSheet("background-color: #1a3344; font-weight: bold;")
+        self.btn_ptt.clicked.connect(self._on_ptt_clicked)
+        voice_top_row.addWidget(self.btn_ptt)
+
+        self.btn_stop_speaking = QPushButton("Stop Speaking", self)
+        self.btn_stop_speaking.setStyleSheet("background-color: #552222;")
+        self.btn_stop_speaking.clicked.connect(self._on_stop_speaking_clicked)
+        voice_top_row.addWidget(self.btn_stop_speaking)
+
+        self.voice_state_pill = QLabel("VOICE: DISABLED", self)
+        self.voice_state_pill.setStyleSheet("background-color: #1a2332; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+        voice_top_row.addWidget(self.voice_state_pill)
+
+        voice_layout.addLayout(voice_top_row)
+
+        voice_opts_row = QHBoxLayout()
+        self.chk_wake_listening = QCheckBox("Wake-Word Listening", self)
+        self.chk_wake_listening.setChecked(True)
+        self.chk_wake_listening.toggled.connect(self._on_wake_listening_toggled)
+        voice_opts_row.addWidget(self.chk_wake_listening)
+
+        self.chk_wake_zoro = QCheckBox("Wake: 'Zoro'", self)
+        self.chk_wake_zoro.setChecked(True)
+        self.chk_wake_zoro.toggled.connect(lambda chk: self._on_wake_phrase_toggled("zoro", chk))
+        voice_opts_row.addWidget(self.chk_wake_zoro)
+
+        self.chk_wake_hey_zoro = QCheckBox("Wake: 'Hey Zoro'", self)
+        self.chk_wake_hey_zoro.setChecked(True)
+        self.chk_wake_hey_zoro.toggled.connect(lambda chk: self._on_wake_phrase_toggled("hey zoro", chk))
+        voice_opts_row.addWidget(self.chk_wake_hey_zoro)
+
+        voice_layout.addLayout(voice_opts_row)
+        main_layout.addWidget(voice_group)
 
         # 5. Interactive Human-in-the-Loop Approval Box (Hidden until needed)
         self.approval_group = QGroupBox("SECURITY AUTHORIZATION REQUIRED", self)
@@ -396,6 +445,64 @@ class ZoroMainWindow(QMainWindow):
                 wins = res["windows"][:5]
                 summary = ", ".join([f"'{w.get('title')}' ({w.get('handle')})" for w in wins if w.get("title")])
                 self.append_log(f"[Windows ({len(res['windows'])})] Top active: {summary}")
+
+    @Slot(dict)
+    def update_voice_state(self, payload: Dict[str, Any]) -> None:
+        new_state = payload.get("new_state", payload.get("state", "IDLE"))
+        self.voice_state_pill.setText(f"VOICE: {new_state}")
+        if new_state in ("LISTENING", "DETECTED"):
+            self.voice_state_pill.setStyleSheet("background-color: #003322; color: #00ff88; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+        elif new_state in ("SPEAKING", "TRANSCRIBING", "PROCESSING"):
+            self.voice_state_pill.setStyleSheet("background-color: #102a3d; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+        elif new_state in ("ERROR", "MUTED"):
+            self.voice_state_pill.setStyleSheet("background-color: #3d1010; color: #ff4444; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+        else:
+            self.voice_state_pill.setStyleSheet("background-color: #1a2332; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+        self.append_log(f"[Voice] State -> {new_state}")
+
+    @Slot(dict)
+    def update_voice_transcription(self, payload: Dict[str, Any]) -> None:
+        text = payload.get("text", "")
+        speaker = payload.get("speaker", "user")
+        if text:
+            self.append_log(f"[Voice Transcription ({speaker})] \"{text}\"")
+
+    def _on_voice_toggle_clicked(self) -> None:
+        if self.btn_voice_toggle.text() == "Enable Voice":
+            self.append_log("[Voice] Enabling voice interaction...")
+            if self.ipc_call_handler:
+                res = self.ipc_call_handler("voice.start", {})
+                if res and res.get("started"):
+                    self.btn_voice_toggle.setText("Disable Voice")
+                    self.append_log("[Voice] Voice interaction active.")
+        else:
+            self.append_log("[Voice] Disabling voice interaction...")
+            if self.ipc_call_handler:
+                res = self.ipc_call_handler("voice.stop", {})
+                self.btn_voice_toggle.setText("Enable Voice")
+                self.append_log("[Voice] Voice interaction stopped.")
+
+    def _on_ptt_clicked(self) -> None:
+        self.append_log("[Voice] Push-to-Talk triggered.")
+        if self.ipc_call_handler:
+            self.ipc_call_handler("voice.push_to_talk", {})
+
+    def _on_stop_speaking_clicked(self) -> None:
+        self.append_log("[Voice] User requested immediate speech stop.")
+        if self.ipc_call_handler:
+            self.ipc_call_handler("voice.stop_speaking", {})
+
+    def _on_wake_listening_toggled(self, checked: bool) -> None:
+        action = "enabled" if checked else "disabled"
+        self.append_log(f"[Voice] Wake-word listening {action}.")
+        if self.ipc_call_handler:
+            self.ipc_call_handler("voice.set_wake_listening", {"enabled": checked})
+
+    def _on_wake_phrase_toggled(self, phrase: str, checked: bool) -> None:
+        status = "enabled" if checked else "disabled"
+        self.append_log(f"[Voice] Wake phrase '{phrase}' {status}.")
+        if self.ipc_call_handler:
+            self.ipc_call_handler("voice.configure_wake_phrase", {"phrase": phrase, "enabled": checked})
 
     def closeEvent(self, event) -> None:
         event.ignore()

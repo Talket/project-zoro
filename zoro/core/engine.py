@@ -61,6 +61,7 @@ from zoro.tools.builtin.file_tools import (
     ReportGeneratorTool,
 )
 from zoro.tools.registry import ToolRegistry
+from zoro.voice import VoiceManager
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,12 @@ class ZoroEngine:
             governor=self.comp_governor,
         )
         self.ui_verification = UIVerificationEngine(self.window_mgr, self.element_inspector)
+        self.voice_mgr = VoiceManager(
+            db=self.db,
+            orchestrator=self.orchestrator,
+            event_bus=self.event_bus,
+            emergency_mgr=self.emergency_mgr,
+        )
         self._register_default_tools()
 
         self._telemetry_task: Optional[asyncio.Task] = None
@@ -212,6 +219,14 @@ class ZoroEngine:
         await self.event_bus.subscribe("plan.approval_required", self._on_approval_required)
         await self.event_bus.subscribe("step.started", self._on_step_event)
         await self.event_bus.subscribe("step.completed", self._on_step_event)
+        await self.event_bus.subscribe("voice.state_changed", self._on_voice_event)
+        await self.event_bus.subscribe("voice.transcription", self._on_voice_event)
+        await self.event_bus.subscribe("voice.speaking_started", self._on_voice_event)
+        await self.event_bus.subscribe("voice.speaking_finished", self._on_voice_event)
+        await self.event_bus.subscribe("voice.interrupted", self._on_voice_event)
+
+        # 6b. Initialize voice subsystem
+        await self.voice_mgr.initialize()
 
         # 7. Register IPC JSON-RPC handlers
         self._register_ipc_handlers()
@@ -270,6 +285,32 @@ class ZoroEngine:
         self.ipc_server.register_handler("computer.get_profile", self._rpc_computer_get_profile)
         self.ipc_server.register_handler("computer.set_profile", self._rpc_computer_set_profile)
         self.ipc_server.register_handler("computer.get_resource_status", self._rpc_computer_get_resource_status)
+
+        # Voice Interaction RPCs (Milestone 04)
+        self.ipc_server.register_handler("voice.get_status", self._rpc_voice_get_status)
+        self.ipc_server.register_handler("voice.enable", self._rpc_voice_enable)
+        self.ipc_server.register_handler("voice.disable", self._rpc_voice_disable)
+        self.ipc_server.register_handler("voice.start_listening", self._rpc_voice_start_listening)
+        self.ipc_server.register_handler("voice.stop_listening", self._rpc_voice_stop_listening)
+        self.ipc_server.register_handler("voice.start_push_to_talk", self._rpc_voice_start_push_to_talk)
+        self.ipc_server.register_handler("voice.stop_push_to_talk", self._rpc_voice_stop_push_to_talk)
+        self.ipc_server.register_handler("voice.get_devices", self._rpc_voice_get_devices)
+        self.ipc_server.register_handler("voice.set_input_device", self._rpc_voice_set_input_device)
+        self.ipc_server.register_handler("voice.set_output_device", self._rpc_voice_set_output_device)
+        self.ipc_server.register_handler("voice.get_providers", self._rpc_voice_get_providers)
+        self.ipc_server.register_handler("voice.set_stt_provider", self._rpc_voice_set_stt_provider)
+        self.ipc_server.register_handler("voice.set_tts_provider", self._rpc_voice_set_tts_provider)
+        self.ipc_server.register_handler("voice.set_wake_word", self._rpc_voice_set_wake_word)
+        self.ipc_server.register_handler("voice.stop_speaking", self._rpc_voice_stop_speaking)
+        self.ipc_server.register_handler("voice.get_metrics", self._rpc_voice_get_metrics)
+        self.ipc_server.register_handler("voice.clear_history", self._rpc_voice_clear_history)
+
+        # Convenient aliases
+        self.ipc_server.register_handler("voice.start", self._rpc_voice_enable)
+        self.ipc_server.register_handler("voice.stop", self._rpc_voice_disable)
+        self.ipc_server.register_handler("voice.push_to_talk", self._rpc_voice_start_push_to_talk)
+        self.ipc_server.register_handler("voice.configure_wake_phrase", self._rpc_voice_set_wake_word)
+        self.ipc_server.register_handler("voice.set_wake_listening", self._rpc_voice_set_wake_listening_alias)
 
     # ---------------------------------------------------------
     # Foundation RPC Implementations
@@ -741,6 +782,103 @@ class ZoroEngine:
         }
 
     # ---------------------------------------------------------
+    # Voice Interaction RPC Implementations (Milestone 04)
+    # ---------------------------------------------------------
+    async def _rpc_voice_get_status(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return self.voice_mgr.get_status()
+
+    async def _rpc_voice_enable(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        ok = self.voice_mgr.enable()
+        return {"success": ok, "status": self.voice_mgr.get_status()}
+
+    async def _rpc_voice_disable(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        ok = self.voice_mgr.disable()
+        return {"success": ok, "status": self.voice_mgr.get_status()}
+
+    async def _rpc_voice_start_listening(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        ok = self.voice_mgr.start_listening()
+        return {"success": ok, "is_listening": self.voice_mgr.pipeline.is_listening}
+
+    async def _rpc_voice_stop_listening(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        ok = self.voice_mgr.stop_listening()
+        return {"success": ok, "is_listening": self.voice_mgr.pipeline.is_listening}
+
+    async def _rpc_voice_start_push_to_talk(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        ok = self.voice_mgr.trigger_push_to_talk()
+        return {"success": ok, "state": self.voice_mgr.pipeline.state.value}
+
+    async def _rpc_voice_stop_push_to_talk(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return {"success": True}
+
+    async def _rpc_voice_get_devices(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return self.voice_mgr.get_devices()
+
+    async def _rpc_voice_set_input_device(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        index = params.get("device_index")
+        if index is None:
+            return {"success": False, "error": "Parameter 'device_index' required"}
+        ok = self.voice_mgr.set_input_device(int(index))
+        return {"success": ok, "device_index": index}
+
+    async def _rpc_voice_set_output_device(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        index = params.get("device_index")
+        if index is None:
+            return {"success": False, "error": "Parameter 'device_index' required"}
+        ok = self.voice_mgr.set_output_device(int(index))
+        return {"success": ok, "device_index": index}
+
+    async def _rpc_voice_get_providers(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "stt_providers": self.voice_mgr.stt.list_providers(),
+            "active_stt": self.voice_mgr.stt.active_provider_name,
+            "tts_providers": self.voice_mgr.tts.list_providers(),
+            "active_tts": self.voice_mgr.tts.active_provider_name,
+            "tts_voices": await self.voice_mgr.tts.list_voices(),
+        }
+
+    async def _rpc_voice_set_stt_provider(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        provider = params.get("provider")
+        if not provider:
+            return {"success": False, "error": "Parameter 'provider' required"}
+        ok = await self.voice_mgr.set_stt_provider(provider)
+        return {"success": ok, "active_stt": self.voice_mgr.stt.active_provider_name}
+
+    async def _rpc_voice_set_tts_provider(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        provider = params.get("provider")
+        if not provider:
+            return {"success": False, "error": "Parameter 'provider' required"}
+        ok = await self.voice_mgr.set_tts_provider(provider)
+        return {"success": ok, "active_tts": self.voice_mgr.tts.active_provider_name}
+
+    async def _rpc_voice_set_wake_word(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        phrase = params.get("phrase")
+        enabled = params.get("enabled", True)
+        if not phrase:
+            return {"success": False, "error": "Parameter 'phrase' required"}
+        ok = self.voice_mgr.set_wake_word_phrase(phrase, enabled)
+        return {"success": ok, "enabled_wake_phrases": list(self.voice_mgr.wake.enabled_phrases)}
+
+    async def _rpc_voice_stop_speaking(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        ok = self.voice_mgr.stop_speaking()
+        return {"success": ok}
+
+    async def _rpc_voice_get_metrics(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        summary = self.voice_mgr.metrics.get_summary()
+        current = self.voice_mgr.pipeline.metrics.model_dump()
+        return {"summary": summary, "current": current}
+
+    async def _rpc_voice_clear_history(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        count = await self.voice_mgr.clear_history()
+        return {"success": True, "cleared": count}
+
+    async def _rpc_voice_set_wake_listening_alias(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        enabled = params.get("enabled", True)
+        if enabled:
+            return await self._rpc_voice_start_listening(params)
+        else:
+            return await self._rpc_voice_stop_listening(params)
+
+    # ---------------------------------------------------------
     # Event Bus Handlers for Real-Time UI Broadcasting
     # ---------------------------------------------------------
     async def _on_orchestrator_state_changed(self, topic: str, payload: Dict[str, Any]) -> None:
@@ -751,6 +889,9 @@ class ZoroEngine:
 
     async def _on_step_event(self, topic: str, payload: Dict[str, Any]) -> None:
         self.ipc_server.broadcast_notification("ai.step_update", payload)
+
+    async def _on_voice_event(self, topic: str, payload: Dict[str, Any]) -> None:
+        self.ipc_server.broadcast_notification(topic, payload)
 
     async def _telemetry_loop(self) -> None:
         """Periodic background loop sampling hardware and emitting telemetry."""
@@ -788,6 +929,12 @@ class ZoroEngine:
 
         # Cancel active orchestrator operations
         self.orchestrator.cancel()
+
+        # Shutdown voice pipeline
+        try:
+            await self.voice_mgr.shutdown()
+        except Exception as e:
+            logger.error("Error shutting down voice manager: %s", e)
 
         # Cancel telemetry task
         if self._telemetry_task:

@@ -62,3 +62,8 @@ class AsyncEventBus:
         except Exception as e:
             logger.error("Exception in event handler %s for topic '%s': %s",
                          getattr(handler, "__name__", "handler"), topic, e, exc_info=True)
+
+
+# Backwards compatibility alias
+EventBus = AsyncEventBus
+

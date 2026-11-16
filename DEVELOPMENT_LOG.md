@@ -261,3 +261,49 @@
   - Zero regressions on Milestones 01 and 02.
   - Milestone 03 status: **COMPLETED AND VERIFIED**.
 
+---
+
+## Session 9: Milestone 04 — High-Speed Local Voice Interaction
+
+### Timestamp: 2026-11-16 18:45 IST
+- **Objective**: Design, implement, integrate, and verify Milestone 04: High-Speed Local Voice Interaction subsystem across audio capture/playback, voice activity detection, offline dual wake-word detection, local STT/TTS cascading registries, conversational turn taking, streaming voice pipeline, Desktop HUD voice panel, Named Pipe IPC, and privacy/security invariants.
+- **Architectural Findings & Key Engineering Solutions**:
+  1. *GPU VRAM Isolation & Zero-VRAM Audio Architecture*:
+     - With only 4096 MiB of GDDR5 VRAM on the NVIDIA GeForce GTX 1050 Ti, running STT or TTS models on the GPU would starve the primary LLM (Ollama / llama.cpp).
+     - Pinned `faster-whisper` strictly to CPU using `compute_type="int8"` (`device="cpu"`), consuming 0 MB of GPU VRAM.
+     - Utilized Windows 11 native SAPI5 (`SpVoice` with `SpMemoryStream`) for TTS, operating 100% in system RAM with 0 MB VRAM and 0 disk I/O.
+     - Preserved 100% of the 4GB GPU VRAM exclusively for central LLM inference.
+  2. *Windows 11 Native In-Memory SAPI5 Audio Synthesis*:
+     - Synthesized pristine 22,050 Hz 16-bit mono PCM audio in memory via `win32com.client.Dispatch("SAPI.SpVoice")` and `SAPI.SpMemoryStream`.
+     - Empirical benchmark confirmed **101.62 ms** first-chunk latency (213,170 bytes = 4.83s of audio generated in 101ms directly in RAM with zero disk writes, zero third-party downloads, and zero cost).
+  3. *Hybrid VAD with Energy Floor Gating*:
+     - Identified that `webrtcvad`'s adaptive GMM filter can mistakenly treat pure acoustic silence as speech if background noise models adapt to high-amplitude tones.
+     - Engineered a hybrid gate: if RMS energy is below the noise floor (`energy < energy_threshold`), the frame is decisively classified as silence regardless of statistical GMM classification.
+     - Empirical benchmark recorded **1184.7x real-time speed** (1.69 ms to process 2.0s of continuous audio).
+  4. *Offline Dual Wake-Word Detection & Self-Voice Suppression*:
+     - Supported **"Zoro"** (primary) and **"Hey Zoro"** (alternative), both enabled by default with independent enable/disable controls in Voice Settings.
+     - Integrated spectral zero-crossing rate (fricative "Z" detection) and formant energy analysis.
+     - Implemented Self-Voice Suppression: wake-word detection is suspended while `playback.is_playing == True` to prevent ZORO from triggering on its own speaker output.
+     - Implemented Push-to-Talk fallback bypassing acoustic detection.
+  5. *Immediate Interruption & Barge-In Playback Cancellation*:
+     - During active assistant playback, audio frames and text streams are inspected by `InterruptionManager`.
+     - Explicit stop keywords ("stop", "cancel", "quiet", "shut up", "hold on", "pause", "wait") or high-energy speech onset immediately abort playback in <10ms via `sd.stop()`.
+  6. *Conversational Turn Taking & Streaming Pipeline*:
+     - `StreamingTextChunker` converts streaming LLM token generation into natural spoken sentences.
+     - `VoiceTurnManager` manages multi-turn dialogue, records utterances to database, and bridges directly to `ZoroOrchestrator`.
+     - When operations require human approval, ZORO speaks an explicit verbal warning: "I require your authorization to execute this sensitive operation: [action]. Please confirm in the dashboard."
+  7. *Privacy & Security Invariants*:
+     - Zero raw audio bytes are ever written to SQLite or audit logs. Only structured text transcripts and latency measurements are stored in `voice_sessions`, `voice_utterances`, and `voice_metrics`.
+     - `clear_history` RPC completely purges all voice interaction records.
+     - Wake-word detection only activates listening and never authorizes computer operations or bypasses permission gates.
+     - Emergency halt terminates audio capture and playback streams immediately.
+  8. *Desktop HUD & Named Pipe RPCs*:
+     - Added Voice Control & Audio Pipeline panel to PySide6 HUD window.
+     - Registered 17 `voice.*` Named Pipe JSON-RPC methods on `ZoroEngine` and wired EventBus broadcasting to IPC notifications.
+- **Verification & Test Suite**:
+  - Test suite expanded to **266 automated tests** across **43 modules** (86 Milestone 01 tests + 39 Milestone 02 tests + 86 Milestone 03 tests + 55 Milestone 04 tests).
+  - Test Pass Rate: **100% (266 passed, 0 failures, 0 errors)** in **37.45 seconds**.
+  - Test Coverage: **86% line coverage** (86.40% exact, 7,887 statements, 1,073 missed) across all `zoro.*` modules.
+  - Zero regressions on Milestones 01, 02, and 03.
+  - Milestone 04 status: **COMPLETED AND VERIFIED**.
+

@@ -147,7 +147,47 @@ PROJECT ZORO is engineered as an autonomous personal intelligence designed to ru
 - Real-Time Approval Dialog: Prompts user to Approve or Reject sensitive operations when paused by the orchestrator.
 - Minimizable to Windows System Tray with global context menu.
 
-### 3.11 Windows Computer Control & Execution Sandbox (`zoro.computer`)
+### 3.12 High-Speed Local Voice Interaction Subsystem (`zoro.voice`)
+- **Audio Capture & Speaker Playback (`zoro.voice.audio`)**:
+  - `AudioDeviceManager`: Hardware audio endpoint discovery via PortAudio / `sounddevice` with headless synthetic fallback.
+  - `CircularAudioBuffer`: Bounded circular ring buffer with overflow eviction, storing raw 16-bit PCM audio with zero unbounded heap growth.
+  - `AudioCaptureManager`: Continuous non-blocking microphone capture (16 kHz, 16-bit mono), live RMS energy level calculation, and synthetic frame injection for CI/testing.
+  - `AudioPlaybackManager`: Queue-based streaming speaker output with immediate playback cancellation (<10ms stop) and software volume scaling.
+- **Voice Activity Detection (`zoro.voice.vad`)**:
+  - `VoiceActivityDetector`: WebRTC VAD engine combined with RMS energy-floor gating (>1100x real-time speed, sub-2ms latency for 2.0s audio). Accurately detects speech onset, ongoing speech, and speech termination.
+- **Offline Local Wake-Word Detection (`zoro.voice.wake`)**:
+  - `WakeWordDetector`: Dual wake-phrase detector supporting **"Zoro"** (primary) and **"Hey Zoro"** (alternative), both enabled by default with independent phrase enable/disable controls. Includes acoustic fricative/spectral analysis, fast transcription hint matching, cooldown enforcement, Push-to-Talk activation, and self-voice suppression during assistant playback.
+- **Modular Speech-to-Text Subsystem (`zoro.voice.stt`)**:
+  - `FasterWhisperProvider`: CTranslate2 inference pinned strictly to CPU `compute_type="int8"` (`device="cpu"`), consuming 0 MB GPU VRAM and preserving 100% of the 4GB GTX 1050 Ti VRAM exclusively for the primary LLM.
+  - `WhisperCppProvider`: Standalone CLI adapter for `whisper-cli.exe`.
+  - `MockSTTProvider`: Deterministic transcription queueing and latency/failure simulation.
+  - `STTRegistry`: Active provider coordinator with RAM model eviction and automatic fallback cascading.
+- **Modular Text-to-Speech Subsystem (`zoro.voice.tts`)**:
+  - `WindowsSapiTTSProvider`: 100% offline, zero-dependency native Windows 11 SAPI5 synthesizer using `SAPI.SpVoice` with `SAPI.SpMemoryStream` (~100ms first-chunk in-memory synthesis, zero disk I/O, zero VRAM).
+  - `PiperTTSProvider`: ONNX neural voice synthesis wrapper with streaming raw output.
+  - `MockTTSProvider`: Synthetic 440 Hz PCM tone generator for test automation.
+  - `TTSRegistry`: Dynamic provider coordinator with sentence streaming and failover cascading.
+- **Conversational Voice Engine (`zoro.voice.conversation`)**:
+  - `VoiceTurnManager`: Conversational context preservation across turns, multi-sentence splitting for streaming TTS, direct routing to Central AI Orchestrator, and verbal approval prompts for sensitive operations.
+  - `VoiceSessionManager`: Session lifecycle and privacy-compliant SQLite logging (`voice_sessions`, `voice_utterances`) with zero raw audio persistence and full history purge (`clear_history`).
+  - `InterruptionManager`: Barge-in playback cancellation detecting explicit stop keywords ("stop", "cancel", "quiet", "shut up", "hold on", "pause", "wait") or high-energy speech onset during active playback.
+- **Streaming Voice Pipeline (`zoro.voice.pipeline`)**:
+  - `VoicePipeline`: Unified asynchronous pipeline orchestrating Capture -> VAD -> Wake Word -> STT -> Orchestrator -> Sentence-chunked TTS -> Playback, with FSM states (`IDLE`, `LISTENING`, `WAKE_DETECTED`, `TRANSCRIBING`, `THINKING`, `SPEAKING`, `INTERRUPTED`, `ERROR`, `DISABLED`).
+  - `StreamingTextChunker`: Incremental sentence splitter turning streaming LLM token streams into natural spoken sentences.
+- **Monitoring & Telemetry (`zoro.voice.monitoring`)**:
+  - `VoiceMetricsCollector`: Running average latencies for STT, TTFT, TTS, and total turnaround times stored in `voice_metrics`.
+  - `VoiceHealthMonitor`: Real-time audio endpoint and hardware health monitor.
+- **Central Facade & Named Pipe RPCs (`zoro.voice.manager` & `zoro.core.engine`)**:
+  - `VoiceManager` facade coordinating all voice components, emergency halt checks, and EventBus broadcasting.
+  - Registered 17 `voice.*` Named Pipe JSON-RPC methods on `ZoroEngine` and wired real-time notifications to the IPC server.
+- **PySide6 Desktop HUD Integration (`zoro.ui`)**:
+  - Dedicated Voice Control & Audio Pipeline panel in HUD: Voice state pill, Enable/Disable toggle, Push-to-Talk, Stop Speaking, Wake-word listening toggle, and independent checkboxes for "Zoro" and "Hey Zoro".
+- **Database Schema Migration 005 (`005_voice_interaction.sql`)**:
+  - Added 4 tables: `voice_sessions`, `voice_utterances`, `voice_metrics`, `voice_settings`.
+- **Security & Privacy Invariants**:
+  - Emergency hard kill immediately terminates audio capture and playback streams and freezes all voice RPCs.
+  - Wake-word detection only activates microphone listening; never bypasses permission tiers or approval tokens.
+  - Raw audio bytes are never stored in database, audit logs, or telemetry payloads.
 - **Windows UI Automation Engine (`zoro.computer.ui`)**:
   - `WindowManager`: Enumeration and manipulation of top-level Win32 windows (`list_windows`, `find_window`, `focus_window`, `minimize_window`, `maximize_window`, `restore_window`, `close_window`, `move_resize_window`, `is_hung` via `IsHungAppWindow`).
   - `UIElementInspector`: UIA accessibility inspection via `pywinauto` backend (`inspect_window_elements`, `list_elements`, `find_element`). Extracts control types, automation IDs, bounding rectangles, enabled/focused states.

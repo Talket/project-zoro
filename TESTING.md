@@ -63,19 +63,35 @@ The test suite contains **211 automated tests** structured across **33 dedicated
 | 32 | `tests/test_tool_registry.py` | 8 | 1.23s | Secure Tool Registry: argument/output validation, 5 capability tiers, single-use approval tokens, replay attack rejection, execution timeouts, built-in file tools, hard-locked security paths, and audit logging. |
 | 33 | `tests/test_ui.py` | 6 | 0.95s | PySide6 Desktop HUD: hardware telemetry rendering, window close-to-tray minimization, tray toggle, AI state badge, directive input prompt, approval prompt dialog, benchmark runner controls, Computer Control panel, worker run loop, and application exit. |
 | 34 | `tests/test_ui_automation.py` | 12 | 1.35s | Windows UI Automation: window enumeration, finding, focus/minimize/maximize/restore/close, UIA element tree inspection, pattern interactor (`invoke`, `set_value`, `toggle`, `select`), keyboard/mouse controllers, coordinate fallback, and observe-act-verify loop. |
-| **Total** | **33 Modules** | **211 Tests** | **~28.33s** | **Milestone 01 Foundation + Milestone 02 Intelligence + Milestone 03 Computer Control** |
+| 35 | `tests/test_voice_audio.py` | 9 | 0.99s | Audio devices, circular buffer, capture, and playback: device enumeration/fallback, ring buffer overflow eviction, non-blocking capture stream, synthetic frame injection, volume scaling, and <10ms playback stop. |
+| 36 | `tests/test_voice_vad.py` | 4 | 0.70s | Voice Activity Detection: WebRTC VAD with RMS energy-floor gating, speech onset detection, speech termination, and silence timeout. |
+| 37 | `tests/test_voice_wake.py` | 7 | 0.78s | Local Offline Wake-Word Detection: dual wake phrases ("Zoro" and "Hey Zoro"), independent phrase enable/disable toggling, Push-to-Talk fallback, text-hint matching, acoustic feature processing, self-voice suppression during playback, and cooldown enforcement. |
+| 38 | `tests/test_voice_stt.py` | 4 | 5.20s | Speech-to-Text Subsystem: FasterWhisperProvider (CPU int8 configuration, 0 MB GPU VRAM footprint), WhisperCppProvider, MockSTTProvider queueing, and STTRegistry fallback cascading. |
+| 39 | `tests/test_voice_tts.py` | 4 | 0.61s | Text-to-Speech Subsystem: WindowsSapiTTSProvider (native Windows 11 SAPI5 in-memory synthesis, ~100ms first-chunk), PiperTTSProvider, MockTTSProvider, and TTSRegistry fallback cascading. |
+| 40 | `tests/test_voice_conversation.py` | 5 | 2.98s | Conversational Voice Subsystem: VoiceSessionManager (DB persistence, privacy opt-out), InterruptionManager (barge-in keywords and high-energy speech onset), and VoiceTurnManager (sentence splitting, orchestrator dispatch, verbal approval prompts). |
+| 41 | `tests/test_voice_pipeline.py` | 4 | 0.58s | Streaming Voice Pipeline: VoicePipeline state machine transitions (`IDLE`, `LISTENING`, `WAKE_DETECTED`, `TRANSCRIBING`, `THINKING`, `SPEAKING`, `INTERRUPTED`, `ERROR`, `DISABLED`), audio callback dispatch, utterance collection, and metrics tracking. |
+| 42 | `tests/test_voice_security_adversarial.py` | 4 | 0.67s | Security & Adversarial Invariants: Emergency halt immediately terminates audio capture and playback, wake-word detection never grants permissions or bypasses approval gates, voice commands enforce identical permission tiers, and privacy invariant (zero raw audio bytes stored in DB or audit logs). |
+| 43 | `tests/test_e2e_voice.py` | 1 | 2.40s | Milestone 04 End-to-End Voice Integration: verifies ZoroEngine initialization and all 17 Named Pipe JSON-RPC methods (`voice.*`). |
+| 44 | `tests/test_voice_hardware_benchmarks.py` | 5 | 0.71s | Hardware benchmarks on host Windows 11 machine: audio device discovery (0.46ms), SAPI5 in-memory synthesis latency (101.62ms), WebRTC VAD throughput (1184.7x real-time), ring buffer throughput (4.21ms for 1M samples), and faster-whisper CPU int8 VRAM isolation (0 MB VRAM). |
+| 45 | `tests/test_coverage_booster_m4.py` | 8 | 1.07s | Edge case coverage booster: StreamingTextChunker token buffering/flushing, VoiceMetricsCollector window trimming, VoiceHealthMonitor checks, stereo-to-mono audio capture conversion, and Piper error paths. |
+| **Total** | **43 Modules** | **266 Tests** | **~37.45s** | **Milestone 01 Foundation + Milestone 02 Intelligence + Milestone 03 Computer Control + Milestone 04 Voice Interaction** |
 
 ---
 
 ## 3. Verified Coverage & Quality Metrics
 
-- **Total Statements**: 6,023
-- **Missed Statements**: 825
-- **Overall Line Coverage**: **86%** (86.30%, exceeding the $\ge 85\%$ milestone requirement).
-- **Test Pass Rate**: **100%** (211 passed, 0 failed, 0 skipped, 0 errors).
-- **Execution Speed**: 211 tests execute in **28.33 seconds** on the host Windows machine.
-- **Milestones 01 & 02 Regressions**: **0 regressions** (all 125 baseline tests pass).
-- **Milestone 03 Additions**: **86 new tests** verifying all computer control and execution sandbox components.
+- **Total Statements**: 7,887
+- **Missed Statements**: 1,073
+- **Overall Line Coverage**: **86%** (86.40%, exceeding the $\ge 85\%$ milestone requirement).
+- **Test Pass Rate**: **100%** (266 passed, 0 failed, 0 skipped, 0 errors).
+- **Execution Speed**: 266 tests execute in **37.45 seconds** on the host Windows machine.
+- **Milestones 01, 02 & 03 Regressions**: **0 regressions** (all 211 baseline tests pass).
+- **Milestone 04 Additions**: **55 new tests** verifying all audio capture, VAD, wake-word, STT, TTS, conversation, pipeline, and security components.
+- **Hardware Zero-VRAM Invariant**: `faster-whisper` and Windows SAPI5 run 100% on CPU and system RAM, preserving 100% of the 4GB NVIDIA GeForce GTX 1050 Ti VRAM exclusively for the primary LLM (Ollama/llama.cpp).
+- **Sub-150ms Synthesis Invariant**: Windows SAPI5 in-memory synthesis achieves **101.62 ms** first-chunk latency directly in memory without disk I/O.
+- **Real-Time VAD Invariant**: WebRTC VAD with energy-floor gating processes audio at **1184.7x real-time speed** (1.69 ms for 2.0s of audio).
+- **Privacy & Storage Invariant**: Zero raw audio bytes are ever written to SQLite or audit logs; only structured transcripts and performance metrics are retained; `clear_history` purges all voice interaction records.
+- **Emergency Freeze Invariant**: Emergency hard kill immediately halts microphone streams, aborts speaker playback in <10ms, and freezes all voice RPCs.
 - **SQLite Concurrency Invariant**: Zero database lock errors under serialized writer load.
 - **Kernel Process Containment Invariant**: Descendant processes cannot escape the Job Object, cannot inherit job handles, and are terminated unconditionally upon job termination or supervisor crash.
 - **Native Offline OCR Invariant**: 100% offline Windows WinRT OCR extraction without external binary downloads or fees.

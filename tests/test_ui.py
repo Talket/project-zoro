@@ -168,6 +168,37 @@ def test_main_window_intelligence_controls(qapp, test_settings):
     win.btn_windows.click()
     assert any(c[0] == "computer.list_windows" for c in handled_calls)
 
+    # 9. Test Voice Interaction UI widgets (Milestone 04)
+    win.update_voice_state({"new_state": "LISTENING"})
+    assert "LISTENING" in win.voice_state_pill.text()
+
+    win.update_voice_state({"new_state": "SPEAKING"})
+    assert "SPEAKING" in win.voice_state_pill.text()
+
+    win.update_voice_state({"new_state": "ERROR"})
+    assert "ERROR" in win.voice_state_pill.text()
+
+    win.update_voice_transcription({"text": "Hello Zoro", "speaker": "user"})
+    assert "Hello Zoro" in win.console.toPlainText()
+
+    win.btn_voice_toggle.click()
+    assert any(c[0] == "voice.start" for c in handled_calls)
+
+    win.btn_ptt.click()
+    assert any(c[0] == "voice.push_to_talk" for c in handled_calls)
+
+    win.btn_stop_speaking.click()
+    assert any(c[0] == "voice.stop_speaking" for c in handled_calls)
+
+    win.chk_wake_listening.setChecked(False)
+    assert any(c[0] == "voice.set_wake_listening" and c[1].get("enabled") is False for c in handled_calls)
+
+    win.chk_wake_zoro.setChecked(False)
+    assert any(c[0] == "voice.configure_wake_phrase" and c[1].get("phrase") == "zoro" and c[1].get("enabled") is False for c in handled_calls)
+
+    win.chk_wake_hey_zoro.setChecked(False)
+    assert any(c[0] == "voice.configure_wake_phrase" and c[1].get("phrase") == "hey zoro" and c[1].get("enabled") is False for c in handled_calls)
+
 
 def test_ui_ipc_worker_notifications_and_tray(qapp, test_settings):
     """Verify IpcWorkerThread notification forwarding and system tray interactions."""
@@ -179,6 +210,9 @@ def test_ui_ipc_worker_notifications_and_tray(qapp, test_settings):
     worker._on_ai_state("ai.state_changed", {"new_state": "IDLE"})
     worker._on_approval_requested("ai.approval_requested", {"token": "test-token"})
     worker._on_step_update("ai.step_update", {"description": "Running tool"})
+    worker._on_voice_state("voice.state_changed", {"new_state": "LISTENING"})
+    worker._on_voice_transcription("voice.transcription", {"text": "What time is it?"})
+    worker._on_voice_interrupted("voice.interrupted", {})
 
     # Tray activation
     from PySide6.QtWidgets import QSystemTrayIcon

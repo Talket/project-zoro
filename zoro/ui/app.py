@@ -37,6 +37,9 @@ class IpcWorkerThread(threading.Thread):
         self.client.register_notification_handler("ai.state_changed", self._on_ai_state)
         self.client.register_notification_handler("ai.approval_requested", self._on_approval_requested)
         self.client.register_notification_handler("ai.step_update", self._on_step_update)
+        self.client.register_notification_handler("voice.state_changed", self._on_voice_state)
+        self.client.register_notification_handler("voice.transcription", self._on_voice_transcription)
+        self.client.register_notification_handler("voice.interrupted", self._on_voice_interrupted)
 
         backoff = 1.0
         while self._is_running:
@@ -76,6 +79,18 @@ class IpcWorkerThread(threading.Thread):
     def _on_step_update(self, method: str, data: Dict[str, Any]) -> None:
         """Forward plan step progress to Qt GUI thread."""
         self.window.step_update_received.emit(data)
+
+    def _on_voice_state(self, method: str, data: Dict[str, Any]) -> None:
+        """Forward voice pipeline state changes to Qt GUI thread."""
+        self.window.voice_state_received.emit(data)
+
+    def _on_voice_transcription(self, method: str, data: Dict[str, Any]) -> None:
+        """Forward live voice transcription to Qt GUI thread."""
+        self.window.voice_transcription_received.emit(data)
+
+    def _on_voice_interrupted(self, method: str, data: Dict[str, Any]) -> None:
+        """Forward barge-in notification to Qt GUI thread."""
+        self.window.log_message_received.emit("[Voice] Speech playback interrupted (barge-in).")
 
     def stop(self) -> None:
         self._is_running = False
