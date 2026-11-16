@@ -45,6 +45,9 @@ class WhisperCppProvider(BaseSTTProvider):
         sample_rate: int = 16000,
         language: Optional[str] = "en",
     ) -> STTResult:
+        if not self._is_loaded:
+            raise RuntimeError("whisper.cpp provider is not loaded.")
+
         if not pcm_bytes:
             return STTResult(transcript="", confidence=1.0, duration_ms=0.0)
 

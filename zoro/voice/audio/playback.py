@@ -62,6 +62,10 @@ class AudioPlaybackManager:
     def stop_playback(self) -> None:
         """Immediately stop all audio playback, clear pending chunks, and notify listeners."""
         self._stop_event.set()
+        try:
+            sd.stop()
+        except Exception:
+            pass
 
         # Clear remaining queue items
         while not self._queue.empty():
@@ -74,6 +78,10 @@ class AudioPlaybackManager:
         self._is_playing = False
         self._notify_finished()
         logger.debug("Audio playback stopped immediately.")
+
+    def stop(self) -> None:
+        """Alias for stop_playback to provide uniform interface across audio managers."""
+        self.stop_playback()
 
     def _notify_finished(self) -> None:
         with self._lock:

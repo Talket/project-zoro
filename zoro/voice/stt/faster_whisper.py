@@ -37,11 +37,20 @@ class FasterWhisperProvider(BaseSTTProvider):
                 self.config.device,
                 self.config.compute_type,
             )
-            return WhisperModel(
-                self.config.model_name,
-                device=self.config.device,
-                compute_type=self.config.compute_type,
-            )
+            # Guarantee 100% offline loading without outbound network attempts if cached
+            try:
+                return WhisperModel(
+                    self.config.model_name,
+                    device=self.config.device,
+                    compute_type=self.config.compute_type,
+                    local_files_only=True,
+                )
+            except Exception:
+                return WhisperModel(
+                    self.config.model_name,
+                    device=self.config.device,
+                    compute_type=self.config.compute_type,
+                )
 
         try:
             self._model = await asyncio.to_thread(_sync_load)
