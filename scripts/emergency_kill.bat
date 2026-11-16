@@ -8,7 +8,11 @@ echo.
 echo Terminating ZORO process tree and setting emergency halt lock...
 echo.
 
-python "%~dp0emergency_kill.py" --kill --reason "Double-click emergency kill shortcut"
+if exist "%~dp0..\.venv\Scripts\python.exe" (
+    "%~dp0..\.venv\Scripts\python.exe" "%~dp0emergency_kill.py" --kill --reason "Double-click emergency kill shortcut"
+) else (
+    python "%~dp0emergency_kill.py" --kill --reason "Double-click emergency kill shortcut"
+)
 
 echo.
 pause

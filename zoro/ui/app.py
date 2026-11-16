@@ -56,6 +56,9 @@ class IpcWorkerThread(threading.Thread):
                         providers = self.client.send_request("ai.get_providers")
                         if providers:
                             self.window.providers_received.emit(providers)
+                        voice_status = self.client.send_request("voice.get_status")
+                        if voice_status:
+                            self.window.voice_state_received.emit(voice_status)
                     except Exception as e:
                         logger.error("Initial health request failed: %s", e)
                 else:

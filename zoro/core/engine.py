@@ -789,11 +789,11 @@ class ZoroEngine:
 
     async def _rpc_voice_enable(self, params: Dict[str, Any]) -> Dict[str, Any]:
         ok = self.voice_mgr.enable()
-        return {"success": ok, "status": self.voice_mgr.get_status()}
+        return {"success": ok, "started": ok, "status": self.voice_mgr.get_status()}
 
     async def _rpc_voice_disable(self, params: Dict[str, Any]) -> Dict[str, Any]:
         ok = self.voice_mgr.disable()
-        return {"success": ok, "status": self.voice_mgr.get_status()}
+        return {"success": ok, "started": not ok, "status": self.voice_mgr.get_status()}
 
     async def _rpc_voice_start_listening(self, params: Dict[str, Any]) -> Dict[str, Any]:
         ok = self.voice_mgr.start_listening()

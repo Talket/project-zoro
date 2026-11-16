@@ -450,6 +450,9 @@ class ZoroMainWindow(QMainWindow):
     def update_voice_state(self, payload: Dict[str, Any]) -> None:
         new_state = payload.get("new_state", payload.get("state", "IDLE"))
         self.voice_state_pill.setText(f"VOICE: {new_state}")
+        if "is_enabled" in payload:
+            is_en = payload["is_enabled"]
+            self.btn_voice_toggle.setText("Disable Voice" if is_en else "Enable Voice")
         if new_state in ("LISTENING", "DETECTED"):
             self.voice_state_pill.setStyleSheet("background-color: #003322; color: #00ff88; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
         elif new_state in ("SPEAKING", "TRANSCRIBING", "PROCESSING"):
@@ -472,7 +475,7 @@ class ZoroMainWindow(QMainWindow):
             self.append_log("[Voice] Enabling voice interaction...")
             if self.ipc_call_handler:
                 res = self.ipc_call_handler("voice.start", {})
-                if res and res.get("started"):
+                if res and (res.get("started") or res.get("success")):
                     self.btn_voice_toggle.setText("Disable Voice")
                     self.append_log("[Voice] Voice interaction active.")
         else:

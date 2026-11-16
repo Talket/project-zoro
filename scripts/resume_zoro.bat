@@ -8,7 +8,11 @@ echo.
 echo Clearing emergency halt lock...
 echo.
 
-python "%~dp0emergency_kill.py" --resume
+if exist "%~dp0..\.venv\Scripts\python.exe" (
+    "%~dp0..\.venv\Scripts\python.exe" "%~dp0emergency_kill.py" --resume
+) else (
+    python "%~dp0emergency_kill.py" --resume
+)
 
 echo.
 pause
