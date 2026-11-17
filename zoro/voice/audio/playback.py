@@ -25,6 +25,7 @@ class AudioPlaybackManager:
         self._is_playing = False
         self._stop_event = threading.Event()
         self._playback_thread: Optional[threading.Thread] = None
+        self._on_started_callbacks: list[Callable[[], None]] = []
         self._on_finished_callbacks: list[Callable[[], None]] = []
         self._lock = threading.Lock()
 
@@ -32,6 +33,12 @@ class AudioPlaybackManager:
     def is_playing(self) -> bool:
         """Indicates whether speaker audio is currently playing."""
         return self._is_playing
+
+    def register_on_started(self, callback: Callable[[], None]) -> None:
+        """Register a callback invoked when physical audio playback begins."""
+        with self._lock:
+            if callback not in self._on_started_callbacks:
+                self._on_started_callbacks.append(callback)
 
     def register_on_finished(self, callback: Callable[[], None]) -> None:
         """Register a callback invoked when playback finishes or is cancelled."""
@@ -83,6 +90,15 @@ class AudioPlaybackManager:
         """Alias for stop_playback to provide uniform interface across audio managers."""
         self.stop_playback()
 
+    def _notify_started(self) -> None:
+        with self._lock:
+            callbacks = list(self._on_started_callbacks)
+        for cb in callbacks:
+            try:
+                cb()
+            except Exception as e:
+                logger.error("Error in playback started callback: %s", e)
+
     def _notify_finished(self) -> None:
         with self._lock:
             callbacks = list(self._on_finished_callbacks)
@@ -100,25 +116,76 @@ class AudioPlaybackManager:
         self._playback_thread.start()
 
     def _worker_loop(self, sample_rate: int) -> None:
-        """Worker thread executing audio playback chunks."""
+        """Worker thread executing audio playback chunks with device-native resampling & stereo support."""
         logger.debug("Playback worker started at %d Hz.", sample_rate)
+        stream = None
+        target_device = self._current_device_index if self._current_device_index is not None else sd.default.device[1]
+        target_sr = sample_rate
+        target_channels = 1
+
         try:
-            stream = None
+            # Query physical output device properties
+            try:
+                dev_info = sd.query_devices(target_device)
+                dev_sr = int(dev_info.get("default_samplerate", 0))
+                if dev_sr > 0:
+                    target_sr = dev_sr
+                max_ch = int(dev_info.get("max_output_channels", 1))
+                target_channels = 2 if max_ch >= 2 else 1
+                logger.debug(
+                    "Target speaker device %s: native %d Hz, %d channels",
+                    target_device,
+                    target_sr,
+                    target_channels,
+                )
+            except Exception as e_dev:
+                logger.debug("Could not inspect target output device (%s); using %d Hz mono", e_dev, sample_rate)
+
+            # Attempt stream opening: primary device -> default device -> mono fallback
             try:
                 stream = sd.OutputStream(
-                    samplerate=sample_rate,
-                    channels=1,
+                    samplerate=target_sr,
+                    channels=target_channels,
                     dtype="int16",
-                    device=self._current_device_index,
+                    device=target_device,
                 )
                 stream.start()
-            except Exception as e_stream:
-                logger.warning("Could not open native output stream (%s). Simulating playback.", e_stream)
-                stream = None
+            except Exception as e_primary:
+                logger.warning(
+                    "Primary output stream on device %s failed (%s). Attempting default stream.",
+                    target_device,
+                    e_primary,
+                )
+                try:
+                    stream = sd.OutputStream(
+                        samplerate=target_sr,
+                        channels=target_channels,
+                        dtype="int16",
+                    )
+                    stream.start()
+                except Exception as e_secondary:
+                    logger.warning("Default output stream failed (%s). Attempting raw mono.", e_secondary)
+                    try:
+                        target_sr = sample_rate
+                        target_channels = 1
+                        stream = sd.OutputStream(
+                            samplerate=sample_rate,
+                            channels=1,
+                            dtype="int16",
+                        )
+                        stream.start()
+                    except Exception as e_mono:
+                        logger.warning(
+                            "Could not open native output stream (%s). Simulating playback.", e_mono
+                        )
+                        stream = None
+
+            # Notify listeners that physical playback is actively running
+            self._notify_started()
 
             while not self._stop_event.is_set():
                 try:
-                    chunk = self._queue.get(timeout=0.1)
+                    chunk = self._queue.get(timeout=0.35)
                 except queue.Empty:
                     # Queue exhausted
                     break
@@ -129,20 +196,37 @@ class AudioPlaybackManager:
 
                 # Apply volume scaling
                 samples = np.frombuffer(chunk, dtype=np.int16)
+                if len(samples) == 0:
+                    self._queue.task_done()
+                    continue
+
                 if self.volume < 0.99:
                     scaled = (samples.astype(np.float32) * self.volume).astype(np.int16)
-                    chunk_to_play = scaled.tobytes()
+                    samples = scaled
+
+                # Resample int16 PCM if hardware device requires different sample rate
+                if sample_rate != target_sr and len(samples) > 1:
+                    old_len = len(samples)
+                    new_len = int(old_len * target_sr / sample_rate)
+                    if new_len > 0:
+                        old_indices = np.linspace(0, old_len - 1, old_len)
+                        new_indices = np.linspace(0, old_len - 1, new_len)
+                        samples = np.interp(new_indices, old_indices, samples).astype(np.int16)
+
+                # Duplicate mono to stereo if hardware device has 2+ channels
+                if target_channels == 2:
+                    chunk_to_write = np.column_stack((samples, samples))
                 else:
-                    chunk_to_play = chunk
+                    chunk_to_write = samples
 
                 if stream is not None:
                     try:
-                        stream.write(np.frombuffer(chunk_to_play, dtype=np.int16))
+                        stream.write(chunk_to_write)
                     except Exception as e:
                         logger.error("Error writing audio chunk to speaker stream: %s", e)
                 else:
                     # Synthetic delay matching chunk duration
-                    duration_sec = len(samples) / float(sample_rate)
+                    duration_sec = len(samples) / float(target_sr)
                     time.sleep(min(0.05, duration_sec))
 
                 self._queue.task_done()

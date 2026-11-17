@@ -58,7 +58,8 @@ class VoicePipeline:
         # Connect interruption callback
         self.interruption.register_callback(self._on_interrupted)
 
-        # Connect playback finished callback
+        # Connect playback started & finished callbacks
+        self.playback.register_on_started(self._on_playback_started)
         self.playback.register_on_finished(self._on_playback_finished)
 
     @property
@@ -194,7 +195,6 @@ class VoicePipeline:
             self.set_state(VoiceState.THINKING)
 
             think_start = time.perf_counter()
-            self.set_state(VoiceState.SPEAKING)
 
             reply = await self.turn_manager.execute_turn(
                 transcript,
@@ -203,6 +203,10 @@ class VoicePipeline:
             self._metrics.ttft_ms = (time.perf_counter() - think_start) * 1000.0
             self._metrics.total_turnaround_ms = (time.perf_counter() - turn_start) * 1000.0
             logger.info("Voice turn completed. Total turnaround: %.1f ms", self._metrics.total_turnaround_ms)
+
+            # If playback did not start or already finished before execute_turn returned
+            if not self.playback.is_playing and self._state == VoiceState.THINKING:
+                self.set_state(VoiceState.LISTENING if self._is_listening else VoiceState.IDLE)
 
         except Exception as e:
             logger.error("Error processing voice utterance: %s", e)
@@ -215,6 +219,10 @@ class VoicePipeline:
         self.set_state(VoiceState.INTERRUPTED)
         self._collecting_utterance = False
         self._utterance_frames.clear()
+
+    def _on_playback_started(self) -> None:
+        """Invoked when speaker audio physically begins playing."""
+        self.set_state(VoiceState.SPEAKING)
 
     def _on_playback_finished(self) -> None:
         if self._state == VoiceState.SPEAKING:

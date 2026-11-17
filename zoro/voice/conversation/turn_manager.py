@@ -144,7 +144,7 @@ class VoiceTurnManager:
                 if pcm_bytes:
                     if on_audio_chunk:
                         on_audio_chunk(pcm_bytes)
-                    self.playback.play_chunk(pcm_bytes)
+                    self.playback.play_chunk(pcm_bytes, sample_rate=22050)
             except Exception as e:
                 logger.error("Error synthesizing voice response chunk: %s", e)
 

@@ -325,6 +325,23 @@ class ZoroOrchestrator:
         try:
             resp = await self.provider_registry.chat_completion_with_fallback(req)
             reply = resp.content or "I have processed your request, Sir."
+
+            # If active provider returned default mock string, enrich conversational queries with real dynamic answers
+            if reply == "Mock response from ZORO Model Subsystem.":
+                norm_msg = user_message.lower().strip()
+                if "time" in norm_msg:
+                    from datetime import datetime
+                    reply = f"The current time is {datetime.now().strftime('%I:%M %p')}."
+                elif "date" in norm_msg or "today" in norm_msg:
+                    from datetime import datetime
+                    reply = f"Today is {datetime.now().strftime('%A, %B %d, %Y')}."
+                elif "who are you" in norm_msg or "what is your name" in norm_msg:
+                    reply = "I am ZORO, your personal artificial intelligence assistant."
+                elif "system status" in norm_msg:
+                    reply = "All systems are operational. Core engine, desktop shell, and voice interaction are online."
+                elif any(g in norm_msg for g in ("hello", "hi", "hey")):
+                    reply = "Hello. I am listening and ready to assist you."
+
             await self._persist_message(conv_id, "assistant", reply)
             await self.set_state(OrchestratorState.COMPLETED)
             await self.set_state(OrchestratorState.IDLE)
