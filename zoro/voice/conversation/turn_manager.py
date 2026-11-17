@@ -58,7 +58,11 @@ class VoiceTurnManager:
 
         # 1b. Fast response for simple wake word greetings
         lower_clean = clean_text.lower().rstrip(".,!?")
-        if lower_clean in ("zoro", "hey zoro", "hi zoro", "hello zoro"):
+        if lower_clean in (
+            "zoro", "hey zoro", "hi zoro", "hello zoro",
+            "zorro", "hey zorro", "zero", "hey zero",
+            "soro", "hey soro", "so", "hey so"
+        ):
             reply_text = "I'm listening. How can I help you?"
             if on_text_generated:
                 on_text_generated(reply_text)
@@ -72,7 +76,11 @@ class VoiceTurnManager:
 
         # Strip wake prefix if user spoke "Zoro, <command>" in one breath
         prompt_text = clean_text
-        for prefix in ("hey zoro,", "hey zoro", "zoro,", "zoro"):
+        for prefix in (
+            "hey zoro,", "hey zoro", "zoro,", "zoro",
+            "hey zorro,", "hey zorro", "zorro,", "zorro",
+            "hey zero,", "hey zero", "zero,", "zero",
+        ):
             if prompt_text.lower().startswith(prefix):
                 stripped = prompt_text[len(prefix):].strip().lstrip(",:- ")
                 if stripped:

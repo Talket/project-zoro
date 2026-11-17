@@ -123,3 +123,64 @@ def test_wake_word_acoustic_processing():
     res_acoustic = det.process_audio(audio_bytes)
     # Checks that acoustic branch runs without error
     assert isinstance(res_acoustic, WakeWordResult)
+
+
+def test_wake_word_acoustic_speech_detection_both_phrases():
+    """Verify acoustic detection for both 'zoro' and 'hey zoro' utterances."""
+    det = WakeWordDetector(config=WakeWordConfig(sensitivity=0.7, cooldown_seconds=0.01), sample_rate=16000)
+    fs = 16000
+
+    # 1. Synthesize 'zoro' speech envelope (~0.40s)
+    t_zoro = np.linspace(0, 0.40, int(fs * 0.40))
+    env_zoro = np.abs(np.sin(2 * np.pi * 2.5 * t_zoro)) ** 0.8
+    carrier_zoro = np.sin(2 * np.pi * 180 * t_zoro) + 0.5 * np.sin(2 * np.pi * 700 * t_zoro)
+    carrier_zoro[:int(fs * 0.08)] += np.random.normal(0, 0.4, int(fs * 0.08))
+    speech_zoro = (carrier_zoro * env_zoro * 0.15).astype(np.float32)
+
+    buf_zoro = np.random.normal(0, 0.005, int(fs * 1.5)).astype(np.float32)
+    buf_zoro[int(fs * 0.5) : int(fs * 0.5) + len(speech_zoro)] += speech_zoro
+    pcm_zoro = (buf_zoro * 32767).clip(-32768, 32767).astype(np.int16).tobytes()
+
+    res_zoro = det.process_audio(pcm_zoro)
+    assert res_zoro.detected is True
+    assert res_zoro.wake_word == "zoro"
+    assert res_zoro.confidence >= 0.70
+
+    # 2. Synthesize 'hey zoro' speech envelope (~0.85s)
+    time.sleep(0.02)
+    t_hey = np.linspace(0, 0.85, int(fs * 0.85))
+    env_hey = np.abs(np.sin(2 * np.pi * 1.8 * t_hey)) ** 0.8
+    carrier_hey = np.sin(2 * np.pi * 160 * t_hey) + 0.4 * np.sin(2 * np.pi * 650 * t_hey)
+    carrier_hey[:int(fs * 0.1)] += np.random.normal(0, 0.3, int(fs * 0.1))
+    speech_hey = (carrier_hey * env_hey * 0.15).astype(np.float32)
+
+    buf_hey = np.random.normal(0, 0.005, int(fs * 1.5)).astype(np.float32)
+    buf_hey[int(fs * 0.4) : int(fs * 0.4) + len(speech_hey)] += speech_hey
+    pcm_hey = (buf_hey * 32767).clip(-32768, 32767).astype(np.int16).tobytes()
+
+    res_hey = det.process_audio(pcm_hey)
+    assert res_hey.detected is True
+    assert res_hey.wake_word == "hey zoro"
+    assert res_hey.confidence >= 0.70
+
+
+def test_wake_word_noise_rejection():
+    """Verify flat noise, constant hum, and low-energy audio are strictly rejected."""
+    det = WakeWordDetector(config=WakeWordConfig(sensitivity=0.6, cooldown_seconds=0.01), sample_rate=16000)
+    fs = 16000
+
+    # Low-energy noise
+    low_noise = np.random.normal(0, 0.005, int(fs * 1.0))
+    res_low = det.process_audio((low_noise * 32767).astype(np.int16).tobytes())
+    assert res_low.detected is False
+
+    # Flat unmodulated white noise (mod_ratio < 1.15)
+    flat_noise = np.random.normal(0, 0.05, int(fs * 0.8))
+    res_flat = det.process_audio((flat_noise * 32767).astype(np.int16).tobytes())
+    assert res_flat.detected is False
+
+    # Pure low-frequency sine hum (ZCR < 0.015)
+    t = np.linspace(0, 0.8, int(fs * 0.8))
+    hum = (np.sin(2 * np.pi * 60 * t) * 0.1 * 32767).astype(np.int16).tobytes()
+    res_hum = det.process_audio(hum)
+    assert res_hum.detected is False

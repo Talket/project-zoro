@@ -52,6 +52,7 @@ class VoicePipeline:
         self._pipeline_task: Optional[asyncio.Task] = None
         self._metrics = PipelineMetrics()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._followup_until: float = 0.0
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Assign the primary engine event loop for thread-safe cross-thread scheduling."""
@@ -148,13 +149,20 @@ class VoicePipeline:
                 self._dispatch_transcription(audio_payload)
             return
 
-        # 4. If listening for wake word
+        # 4. If listening for wake word or in active conversational follow-up
         if self._is_listening and self._state in (VoiceState.IDLE, VoiceState.LISTENING):
-            # Pass recent audio to wake detector
-            recent_audio = self.capture.audio_buffer.get_recent(1.5)
-            wake_res = self.wake.process_audio(recent_audio)
-            if wake_res.detected:
-                self._on_wake_detected(wake_res.wake_word or "zoro")
+            now = time.time()
+            if now < self._followup_until and (vad_res.speech_onset or (vad_res.is_speech and rms > 0.015)):
+                self._followup_until = 0.0
+                self._on_wake_detected("follow_up")
+                return
+
+            # Pass recent audio to wake detector (2.0s window for full wake phrases)
+            recent_audio = self.capture.audio_buffer.get_recent(2.0)
+            if len(recent_audio) > 0:
+                wake_res = self.wake.process_audio(recent_audio)
+                if wake_res.detected:
+                    self._on_wake_detected(wake_res.wake_word or "zoro")
 
     def _on_wake_detected(self, wake_phrase: str) -> None:
         logger.info("Wake word activated pipeline: '%s'", wake_phrase)
@@ -224,6 +232,10 @@ class VoicePipeline:
             self._metrics.ttft_ms = (time.perf_counter() - think_start) * 1000.0
             self._metrics.total_turnaround_ms = (time.perf_counter() - turn_start) * 1000.0
             logger.info("Voice turn completed. Total turnaround: %.1f ms", self._metrics.total_turnaround_ms)
+
+            # If the turn was a wake greeting, extend conversational follow-up window
+            if reply and any(k in reply.lower() for k in ("listening", "help you", "how can i")):
+                self._followup_until = time.time() + 7.0
 
             # If playback did not start or already finished before execute_turn returned
             if not self.playback.is_playing and self._state == VoiceState.THINKING:
