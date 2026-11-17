@@ -106,6 +106,19 @@ class ZoroDesktopApp:
 
     def __init__(self, settings: Optional[ZoroSettings] = None) -> None:
         self.settings = settings or get_settings()
+
+        # On Windows, ensure main GUI thread is attached to the interactive desktop ("Default")
+        import os
+        if os.name == "nt":
+            try:
+                import ctypes
+                user32 = ctypes.windll.user32
+                h_desk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
+                if h_desk:
+                    user32.SetThreadDesktop(h_desk)
+            except Exception as e:
+                logger.debug("Desktop switch to Default failed: %s", e)
+
         self.app = QApplication.instance() or QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)
         self.app.setStyleSheet(HUD_STYLESHEET)
@@ -157,6 +170,8 @@ class ZoroDesktopApp:
             self.window.hide()
         else:
             self.window.show()
+            self.window.raise_()
+            self.window.activateWindow()
             self.window.activateWindow()
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
@@ -178,6 +193,8 @@ class ZoroDesktopApp:
             )
         else:
             self.window.show()
+            self.window.raise_()
+            self.window.activateWindow()
 
         ret = self.app.exec()
         self.ipc_worker.stop()
