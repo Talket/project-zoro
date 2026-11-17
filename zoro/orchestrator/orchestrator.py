@@ -308,12 +308,18 @@ class ZoroOrchestrator:
     async def _handle_direct_conversation(
         self, conv_id: str, user_message: str
     ) -> OrchestratorResponse:
-        # Build prompt with history
-        history = await self._load_conversation_history(conv_id)
+        # Build prompt with history (fetch up to 12 most recent messages in chronological order)
+        history = await self._load_conversation_history(conv_id, limit=12)
         messages = [
             ChatMessage(role="system", content="You are ZORO, a sophisticated and loyal personal artificial intelligence assistant.")
         ]
-        messages.extend(history)
+        
+        # Ensure the prompt ends with the current user message
+        if history and history[-1].role == "user" and history[-1].content == user_message:
+            messages.extend(history)
+        else:
+            messages.extend(history)
+            messages.append(ChatMessage(role="user", content=user_message))
 
         req = ChatCompletionRequest(
             model=self.provider_registry.get_active_model(),
@@ -324,7 +330,8 @@ class ZoroOrchestrator:
 
         try:
             resp = await self.provider_registry.chat_completion_with_fallback(req)
-            reply = resp.content or "I have processed your request, Sir."
+            raw_reply = resp.content.strip() if resp.content else ""
+            reply = raw_reply or "I am listening, Sir. How may I assist you?"
 
             # If active provider returned default mock string, enrich conversational queries with real dynamic answers
             if reply == "Mock response from ZORO Model Subsystem.":
@@ -505,8 +512,15 @@ class ZoroOrchestrator:
         if not self.db:
             return []
         try:
+            # Query the latest `limit` messages in ascending chronological order
             rows = await self.db.execute_read(
-                "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id ASC LIMIT ?",
+                """
+                SELECT role, content FROM (
+                    SELECT id, role, content FROM messages
+                    WHERE conversation_id = ?
+                    ORDER BY id DESC LIMIT ?
+                ) ORDER BY id ASC
+                """,
                 (conv_id, limit),
             )
             return [ChatMessage(role=r[0], content=r[1]) for r in rows]

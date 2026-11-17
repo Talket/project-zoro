@@ -97,6 +97,10 @@ class VoicePipeline:
     def enable(self) -> None:
         """Enable voice interaction pipeline."""
         self._is_enabled = True
+        self.capture.audio_buffer.clear()
+        self._collecting_utterance = False
+        self._utterance_frames.clear()
+        self._followup_until = 0.0
         self.capture.start_capture()
         self.set_state(VoiceState.LISTENING if self._is_listening else VoiceState.IDLE)
         logger.info("VoicePipeline enabled.")
@@ -106,8 +110,10 @@ class VoicePipeline:
         self._is_enabled = False
         self.playback.stop_playback()
         self.capture.stop_capture()
+        self.capture.audio_buffer.clear()
         self._collecting_utterance = False
         self._utterance_frames.clear()
+        self._followup_until = 0.0
         self.set_state(VoiceState.DISABLED)
         logger.info("VoicePipeline disabled.")
 
@@ -201,6 +207,9 @@ class VoicePipeline:
 
     async def _process_utterance(self, audio_bytes: bytes) -> None:
         """Execute STT and conversation turn."""
+        if not self._is_enabled:
+            return
+
         turn_start = time.perf_counter()
         self.set_state(VoiceState.TRANSCRIBING)
 
@@ -208,6 +217,10 @@ class VoicePipeline:
             stt_start = time.perf_counter()
             stt_res = await self.stt.transcribe(audio_bytes)
             self._metrics.stt_latency_ms = (time.perf_counter() - stt_start) * 1000.0
+
+            if not self._is_enabled:
+                self.set_state(VoiceState.DISABLED)
+                return
 
             transcript = stt_res.transcript.strip()
             if not transcript:
@@ -233,6 +246,10 @@ class VoicePipeline:
             self._metrics.total_turnaround_ms = (time.perf_counter() - turn_start) * 1000.0
             logger.info("Voice turn completed. Total turnaround: %.1f ms", self._metrics.total_turnaround_ms)
 
+            if not self._is_enabled:
+                self.set_state(VoiceState.DISABLED)
+                return
+
             # If the turn was a wake greeting, extend conversational follow-up window
             if reply and any(k in reply.lower() for k in ("listening", "help you", "how can i")):
                 self._followup_until = time.time() + 7.0
@@ -243,14 +260,22 @@ class VoicePipeline:
 
         except asyncio.TimeoutError:
             logger.error("Voice turn processing timed out after 30 seconds.")
+            if not self._is_enabled:
+                self.set_state(VoiceState.DISABLED)
+                return
             self.set_state(VoiceState.ERROR)
             await asyncio.sleep(1.0)
-            self.set_state(VoiceState.LISTENING if self._is_listening else VoiceState.IDLE)
+            if self._is_enabled:
+                self.set_state(VoiceState.LISTENING if self._is_listening else VoiceState.IDLE)
         except Exception as e:
             logger.error("Error processing voice utterance: %s", e)
+            if not self._is_enabled:
+                self.set_state(VoiceState.DISABLED)
+                return
             self.set_state(VoiceState.ERROR)
             await asyncio.sleep(1.0)
-            self.set_state(VoiceState.LISTENING if self._is_listening else VoiceState.IDLE)
+            if self._is_enabled:
+                self.set_state(VoiceState.LISTENING if self._is_listening else VoiceState.IDLE)
 
     def _on_interrupted(self, reason: str) -> None:
         logger.info("Pipeline received interruption: %s", reason)
@@ -264,4 +289,7 @@ class VoicePipeline:
 
     def _on_playback_finished(self) -> None:
         if self._state == VoiceState.SPEAKING:
-            self.set_state(VoiceState.LISTENING if self._is_listening else VoiceState.IDLE)
+            if not self._is_enabled:
+                self.set_state(VoiceState.DISABLED)
+            else:
+                self.set_state(VoiceState.LISTENING if self._is_listening else VoiceState.IDLE)

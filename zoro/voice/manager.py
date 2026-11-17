@@ -254,5 +254,6 @@ class VoiceManager:
         }
 
     async def clear_history(self) -> int:
-        """Clear voice interaction history for privacy."""
+        """Clear voice interaction history for privacy and reset dialogue session."""
+        self.turn_mgr.reset_conversation()
         return await self.session_mgr.clear_history()
