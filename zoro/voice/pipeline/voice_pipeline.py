@@ -51,6 +51,11 @@ class VoicePipeline:
         self._collecting_utterance: bool = False
         self._pipeline_task: Optional[asyncio.Task] = None
         self._metrics = PipelineMetrics()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Assign the primary engine event loop for thread-safe cross-thread scheduling."""
+        self._loop = loop
 
         # Connect audio frame callback
         self.capture.register_callback(self._on_audio_frame)
@@ -165,12 +170,25 @@ class VoicePipeline:
             self._utterance_frames.append(pre_audio.tobytes())
 
     def _dispatch_transcription(self, audio_bytes: bytes) -> None:
-        """Dispatch speech-to-text and turn processing asynchronously."""
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._process_utterance(audio_bytes))
-        except RuntimeError:
-            # No running loop, run in separate thread
+        """Dispatch speech-to-text and turn processing asynchronously onto the engine event loop."""
+        target_loop = self._loop
+        if target_loop is None or not target_loop.is_running():
+            try:
+                target_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                target_loop = None
+
+        if target_loop and target_loop.is_running():
+            try:
+                running_now = asyncio.get_running_loop()
+            except RuntimeError:
+                running_now = None
+
+            if running_now is target_loop:
+                target_loop.create_task(self._process_utterance(audio_bytes))
+            else:
+                asyncio.run_coroutine_threadsafe(self._process_utterance(audio_bytes), target_loop)
+        else:
             asyncio.run(self._process_utterance(audio_bytes))
 
     async def _process_utterance(self, audio_bytes: bytes) -> None:
@@ -196,9 +214,12 @@ class VoicePipeline:
 
             think_start = time.perf_counter()
 
-            reply = await self.turn_manager.execute_turn(
-                transcript,
-                on_text_generated=lambda txt: self.on_transcription(txt, "zoro") if self.on_transcription else None,
+            reply = await asyncio.wait_for(
+                self.turn_manager.execute_turn(
+                    transcript,
+                    on_text_generated=lambda txt: self.on_transcription(txt, "zoro") if self.on_transcription else None,
+                ),
+                timeout=30.0,
             )
             self._metrics.ttft_ms = (time.perf_counter() - think_start) * 1000.0
             self._metrics.total_turnaround_ms = (time.perf_counter() - turn_start) * 1000.0
@@ -208,6 +229,11 @@ class VoicePipeline:
             if not self.playback.is_playing and self._state == VoiceState.THINKING:
                 self.set_state(VoiceState.LISTENING if self._is_listening else VoiceState.IDLE)
 
+        except asyncio.TimeoutError:
+            logger.error("Voice turn processing timed out after 30 seconds.")
+            self.set_state(VoiceState.ERROR)
+            await asyncio.sleep(1.0)
+            self.set_state(VoiceState.LISTENING if self._is_listening else VoiceState.IDLE)
         except Exception as e:
             logger.error("Error processing voice utterance: %s", e)
             self.set_state(VoiceState.ERROR)

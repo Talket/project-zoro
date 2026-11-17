@@ -82,6 +82,7 @@ class VoiceManager:
         self.health = VoiceHealthMonitor(device_manager=self.devices)
 
         # 6. Unified Streaming Pipeline
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.pipeline = VoicePipeline(
             capture=self.capture,
             playback=self.playback,
@@ -106,27 +107,49 @@ class VoiceManager:
         return False
 
     def _on_pipeline_state_change(self, state: VoiceState) -> None:
-        """Emit state changes to EventBus."""
+        """Emit state changes to EventBus in a thread-safe manner."""
         if self.event_bus:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self.event_bus.publish(VOICE_STATE_CHANGED, {"state": state.value}))
-            except RuntimeError:
-                pass
+            payload = {"state": state.value}
+            target_loop = self._loop
+            if target_loop and target_loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self.event_bus.publish(VOICE_STATE_CHANGED, payload),
+                    target_loop,
+                )
+            else:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.event_bus.publish(VOICE_STATE_CHANGED, payload))
+                except RuntimeError:
+                    pass
 
     def _on_transcription(self, text: str, speaker: str) -> None:
-        """Emit transcription events to EventBus for HUD display."""
+        """Emit transcription events to EventBus for HUD display in a thread-safe manner."""
         if self.event_bus:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self.event_bus.publish("voice.transcription", {"text": text, "speaker": speaker}))
-            except RuntimeError:
-                pass
+            payload = {"text": text, "speaker": speaker}
+            target_loop = self._loop
+            if target_loop and target_loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self.event_bus.publish("voice.transcription", payload),
+                    target_loop,
+                )
+            else:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.event_bus.publish("voice.transcription", payload))
+                except RuntimeError:
+                    pass
 
     async def initialize(self) -> None:
         """Initialize voice subsystem components."""
         if self._check_emergency_halt():
             return
+
+        try:
+            self._loop = asyncio.get_running_loop()
+            self.pipeline.set_loop(self._loop)
+        except RuntimeError:
+            pass
 
         self.devices.refresh()
         await self.session_mgr.start_session(
