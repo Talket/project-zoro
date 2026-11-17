@@ -91,6 +91,7 @@ class VoiceManager:
             turn_manager=self.turn_mgr,
             interruption=self.interruption,
             on_state_change=self._on_pipeline_state_change,
+            on_transcription=self._on_transcription,
         )
 
     def _check_emergency_halt(self) -> bool:
@@ -110,6 +111,15 @@ class VoiceManager:
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self.event_bus.publish(VOICE_STATE_CHANGED, {"state": state.value}))
+            except RuntimeError:
+                pass
+
+    def _on_transcription(self, text: str, speaker: str) -> None:
+        """Emit transcription events to EventBus for HUD display."""
+        if self.event_bus:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.event_bus.publish("voice.transcription", {"text": text, "speaker": speaker}))
             except RuntimeError:
                 pass
 

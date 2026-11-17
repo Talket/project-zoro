@@ -32,6 +32,7 @@ class VoicePipeline:
         turn_manager: VoiceTurnManager,
         interruption: InterruptionManager,
         on_state_change: Optional[Callable[[VoiceState], None]] = None,
+        on_transcription: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         self.capture = capture
         self.playback = playback
@@ -41,6 +42,7 @@ class VoicePipeline:
         self.turn_manager = turn_manager
         self.interruption = interruption
         self.on_state_change = on_state_change
+        self.on_transcription = on_transcription
 
         self._state: VoiceState = VoiceState.IDLE
         self._is_enabled: bool = False
@@ -153,6 +155,8 @@ class VoicePipeline:
         self.set_state(VoiceState.WAKE_DETECTED)
         self._collecting_utterance = True
         self._utterance_frames.clear()
+        if self.on_transcription:
+            self.on_transcription(f"[Wake Word: '{wake_phrase}']", "system")
 
         # Seed utterance buffer with recent pre-wake audio to prevent cutting off first syllable
         pre_audio = self.capture.audio_buffer.get_recent(0.5)
@@ -185,12 +189,17 @@ class VoicePipeline:
                 return
 
             logger.info("Voice Recognized: '%s'", transcript)
+            if self.on_transcription:
+                self.on_transcription(transcript, "user")
             self.set_state(VoiceState.THINKING)
 
             think_start = time.perf_counter()
             self.set_state(VoiceState.SPEAKING)
 
-            reply = await self.turn_manager.execute_turn(transcript)
+            reply = await self.turn_manager.execute_turn(
+                transcript,
+                on_text_generated=lambda txt: self.on_transcription(txt, "zoro") if self.on_transcription else None,
+            )
             self._metrics.ttft_ms = (time.perf_counter() - think_start) * 1000.0
             self._metrics.total_turnaround_ms = (time.perf_counter() - turn_start) * 1000.0
             logger.info("Voice turn completed. Total turnaround: %.1f ms", self._metrics.total_turnaround_ms)

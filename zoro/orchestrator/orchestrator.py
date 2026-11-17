@@ -209,6 +209,21 @@ class ZoroOrchestrator:
                 error=executed_plan.error,
             )
 
+    async def process_request(
+        self,
+        prompt: str,
+        conversation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Convenience dictionary adapter for process_user_request."""
+        res = await self.process_user_request(user_message=prompt, conversation_id=conversation_id)
+        return {
+            "response": res.message,
+            "plan": res.plan,
+            "state": res.state.value if hasattr(res.state, "value") else str(res.state),
+            "approval_required": res.approval_required,
+            "error": res.error,
+        }
+
     async def resolve_approval(self, token_str: str, approved: bool) -> OrchestratorResponse:
         """Process user's approval decision for a paused plan step and resume execution."""
         if not self._active_plan or self._active_plan.status != PlanStatus.WAITING_FOR_APPROVAL:

@@ -106,28 +106,42 @@ class WakeWordDetector:
         else:
             samples = audio_data.astype(np.int16)
 
-        if len(samples) < int(self.sample_rate * 0.4):  # Need at least 400ms for "Zoro"
+        if len(samples) < int(self.sample_rate * 0.25):
             return WakeWordResult(detected=False)
 
         float_samples = samples.astype(np.float32) / 32768.0
-        rms = float(np.sqrt(np.mean(float_samples**2)))
-        if rms < 0.02:
+
+        # Energy threshold to locate active speech region within the buffer window
+        active_indices = np.where(np.abs(float_samples) > 0.01)[0]
+        if len(active_indices) == 0:
             return WakeWordResult(detected=False)
 
-        # High-frequency zero-crossing rate and syllable onset analysis
-        zcr = np.mean(np.abs(np.diff(np.sign(float_samples)))) / 2.0
-        # "Z" fricative exhibits characteristic high zero-crossing rate (0.15 - 0.45)
-        # followed by "O-RO" vowel formants
-        has_fricative_onset = 0.12 <= zcr <= 0.50
-        duration_sec = len(samples) / float(self.sample_rate)
+        speech_start = active_indices[0]
+        speech_end = active_indices[-1]
+        active_samples = float_samples[speech_start : speech_end + 1]
+        active_duration = len(active_samples) / float(self.sample_rate)
 
-        # Match against duration bounds for "zoro" (0.4s - 1.2s) and "hey zoro" (0.8s - 2.0s)
-        if has_fricative_onset and rms > 0.05:
-            if "hey zoro" in self.enabled_phrases and 0.8 <= duration_sec <= 2.2:
-                # Potential Hey Zoro match
-                confidence = min(0.95, float(rms * 5.0 * self.config.sensitivity))
+        # Need at least 250ms of active speech
+        if active_duration < 0.25:
+            return WakeWordResult(detected=False)
+
+        active_rms = float(np.sqrt(np.mean(active_samples**2)))
+        if active_rms < 0.015:
+            return WakeWordResult(detected=False)
+
+        # Syllable onset fricative analysis for the initial /z/ sound
+        onset_len = max(int(len(active_samples) * 0.4), int(self.sample_rate * 0.08))
+        onset_samples = active_samples[:onset_len]
+        zcr = np.mean(np.abs(np.diff(np.sign(onset_samples)))) / 2.0
+        has_fricative_onset = 0.07 <= zcr <= 0.65
+
+        # Match against duration bounds for "zoro" (0.25s - 1.6s) and "hey zoro" (0.5s - 2.2s)
+        if has_fricative_onset and active_rms >= 0.018:
+            if "hey zoro" in self.enabled_phrases and 0.5 <= active_duration <= 2.2:
+                confidence = min(0.95, float(active_rms * 5.0 * self.config.sensitivity))
                 if confidence >= self.config.sensitivity:
                     self.last_detection_time = now
+                    logger.info("Wake word detected: 'Hey Zoro' (confidence: %.2f)", confidence)
                     return WakeWordResult(
                         detected=True,
                         wake_word="hey zoro",
@@ -135,10 +149,11 @@ class WakeWordDetector:
                         timestamp=now,
                     )
 
-            if "zoro" in self.enabled_phrases and 0.35 <= duration_sec <= 1.4:
-                confidence = min(0.95, float(rms * 4.5 * self.config.sensitivity))
+            if "zoro" in self.enabled_phrases and 0.25 <= active_duration <= 1.6:
+                confidence = min(0.95, float(active_rms * 4.5 * self.config.sensitivity))
                 if confidence >= self.config.sensitivity:
                     self.last_detection_time = now
+                    logger.info("Wake word detected: 'Zoro' (confidence: %.2f)", confidence)
                     return WakeWordResult(
                         detected=True,
                         wake_word="zoro",

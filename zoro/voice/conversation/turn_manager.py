@@ -56,11 +56,47 @@ class VoiceTurnManager:
             status="RECOGNIZED",
         )
 
+        # 1b. Fast response for simple wake word greetings
+        lower_clean = clean_text.lower().rstrip(".,!?")
+        if lower_clean in ("zoro", "hey zoro", "hi zoro", "hello zoro"):
+            reply_text = "I'm listening. How can I help you?"
+            if on_text_generated:
+                on_text_generated(reply_text)
+            await self._speak_response(reply_text, on_audio_chunk)
+            await self.session.record_utterance(
+                transcript=reply_text,
+                conversation_id=self.active_conversation_id,
+                status="PROCESSED",
+            )
+            return reply_text
+
+        # Strip wake prefix if user spoke "Zoro, <command>" in one breath
+        prompt_text = clean_text
+        for prefix in ("hey zoro,", "hey zoro", "zoro,", "zoro"):
+            if prompt_text.lower().startswith(prefix):
+                stripped = prompt_text[len(prefix):].strip().lstrip(",:- ")
+                if stripped:
+                    prompt_text = stripped
+                break
+
         # 2. Dispatch to Central AI Orchestrator
-        orch_res = await self.orchestrator.process_request(
-            prompt=clean_text,
-            conversation_id=self.active_conversation_id,
-        )
+        if hasattr(self.orchestrator, "process_request"):
+            orch_res = await self.orchestrator.process_request(
+                prompt=prompt_text,
+                conversation_id=self.active_conversation_id,
+            )
+        elif hasattr(self.orchestrator, "process_user_request"):
+            resp = await self.orchestrator.process_user_request(
+                user_message=prompt_text,
+                conversation_id=self.active_conversation_id,
+            )
+            orch_res = {
+                "response": resp.message,
+                "plan": resp.plan,
+                "state": resp.state.value if hasattr(resp.state, "value") else str(resp.state),
+            }
+        else:
+            orch_res = {"response": "Understood."}
 
         reply_text = orch_res.get("response", "")
         plan = orch_res.get("plan")
