@@ -63,7 +63,7 @@ class ZoroSettings(BaseSettings):
 
     # Desktop UI
     ui_theme: str = "dark_obsidian"
-    ui_start_minimized: bool = True
+    ui_start_minimized: bool = False
     ui_window_width: int = 1024
     ui_window_height: int = 680
 

@@ -48,7 +48,7 @@ def main() -> None:
     python_exe = str(venv_python) if venv_python.exists() else sys.executable
 
     # 4. Launch ZORO runtime
-    cmd = [python_exe, "-m", "zoro"]
+    cmd = [python_exe, "-m", "zoro"] + sys.argv[1:]
     logger.info("Spawning ZORO process: %s", " ".join(cmd))
     
     try:

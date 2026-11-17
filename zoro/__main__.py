@@ -41,11 +41,17 @@ def main() -> None:
     parser.add_argument("--headless", action="store_true", help="Run Core Runtime Engine only without Desktop UI")
     parser.add_argument("--ui", action="store_true", help="Run Desktop UI Shell only (connects to running engine)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--minimized", action="store_true", help="Start ZORO minimized to system tray")
+    parser.add_argument("--visible", action="store_true", help="Show Desktop HUD immediately on startup")
 
     args = parser.parse_args()
     settings = get_settings()
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
+    if args.minimized:
+        settings.ui_start_minimized = True
+    elif args.visible:
+        settings.ui_start_minimized = False
 
     # 1. Preflight emergency check
     emergency_mgr = EmergencyManager()
