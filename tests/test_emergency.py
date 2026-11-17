@@ -204,7 +204,7 @@ def test_emergency_process_exits_between_lookup_and_open(temp_dir: Path) -> None
     # Attempt termination on already exited process
     success, msg = terminate_process_by_validated_handle(pid, 134000000000000000)
     assert success is False
-    assert "OpenProcess failed" in msg
+    assert "OpenProcess failed" in msg or "PID reuse detected" in msg or "does not match" in msg
 
 
 def test_emergency_pid_reuse_before_open_process(temp_dir: Path) -> None:

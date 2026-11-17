@@ -97,16 +97,19 @@ class ZoroEngine:
         # 2. AI Provider Registry & Adapters
         self.provider_registry = ProviderRegistry()
         self._mock_provider = MockModelProvider()
-        self._ollama_provider = OllamaProvider()
+        self._ollama_provider = OllamaProvider(base_url=self.settings.ollama_url)
         self._llama_provider = LlamaCppProvider()
 
         self.provider_registry.register_provider("mock", self._mock_provider, default_model="mock-v1")
-        self.provider_registry.register_provider("ollama", self._ollama_provider, default_model="qwen2.5:3b")
+        self.provider_registry.register_provider("ollama", self._ollama_provider, default_model=self.settings.primary_model)
         self.provider_registry.register_provider("llama.cpp", self._llama_provider, default_model="default")
-        self.provider_registry.set_active_provider("mock")
+
+        # Activate configured provider from settings if available, with fallback to mock
+        active_prov_name = self.settings.model_provider if self.settings.model_provider in self.provider_registry._providers else "mock"
+        self.provider_registry.set_active_provider(active_prov_name)
 
         # Backward compatibility alias
-        self.model_provider: BaseModelProvider = self._mock_provider
+        self.model_provider: BaseModelProvider = self.provider_registry.get_provider(active_prov_name)
 
         # 3. Model Benchmark Runner
         self.benchmark_runner = HardwareAwareBenchmarkRunner(

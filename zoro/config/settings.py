@@ -68,10 +68,10 @@ class ZoroSettings(BaseSettings):
     ui_window_height: int = 680
 
     # AI Models (Milestone 2 defaults)
-    model_provider: str = "llama_server"  # llama_server, ollama, mock
-    primary_model: str = "qwen2.5:3b-instruct"
-    fallback_model: str = "qwen2.5:1.5b-instruct"
-    coder_model: str = "qwen2.5-coder:7b-instruct"
+    model_provider: str = "ollama"        # ollama, llama_server, mock
+    primary_model: str = "qwen2.5:3b"
+    fallback_model: str = "mock-v1"
+    coder_model: str = "qwen2.5:3b"
     llama_server_path: Optional[str] = None
     ollama_url: str = "http://127.0.0.1:11434"
 

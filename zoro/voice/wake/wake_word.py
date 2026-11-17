@@ -197,8 +197,8 @@ class WakeWordDetector:
         hey_enabled = "hey zoro" in self.enabled_phrases
         zoro_enabled = "zoro" in self.enabled_phrases
 
-        # 3-syllable "Hey Zoro" (typically 0.60s - 2.2s)
-        hey_min_dur = 0.60 if zoro_enabled else 0.40
+        # 3-syllable "Hey Zoro" (typically 0.50s - 2.2s)
+        hey_min_dur = 0.50 if zoro_enabled else 0.40
         if hey_enabled and hey_min_dur <= active_duration <= 2.2:
             dur_score = 1.0 - min(0.3, abs(active_duration - 0.85))
             base_conf = 0.60 + 0.20 * snr_score + 0.10 * mod_score + 0.10 * dur_score
@@ -213,8 +213,8 @@ class WakeWordDetector:
                     timestamp=now,
                 )
 
-        # 2-syllable "Zoro" (typically 0.22s - 0.65s when both enabled, up to 1.4s standalone)
-        zoro_max_dur = 0.65 if hey_enabled else 1.4
+        # 2-syllable "Zoro" (typically 0.22s - 0.52s when both enabled, up to 1.4s standalone)
+        zoro_max_dur = 0.52 if hey_enabled else 1.4
         if zoro_enabled and 0.22 <= active_duration <= zoro_max_dur:
             dur_score = 1.0 - min(0.3, abs(active_duration - 0.45))
             base_conf = 0.60 + 0.20 * snr_score + 0.10 * mod_score + 0.10 * dur_score
