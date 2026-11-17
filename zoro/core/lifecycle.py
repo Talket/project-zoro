@@ -6,6 +6,7 @@ import asyncio
 from enum import Enum
 import logging
 import signal
+import threading
 from typing import Callable, List, Optional
 
 from zoro.security.emergency import EmergencyManager
@@ -63,13 +64,20 @@ class LifecycleManager:
 
     def setup_signal_handlers(self) -> None:
         """Register SIGINT and SIGTERM handlers for graceful exit."""
+        if threading.current_thread() is not threading.main_thread():
+            logger.debug("Skipping OS signal handler registration from non-main thread.")
+            return
+
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(sig, self.request_shutdown)
             except (NotImplementedError, AttributeError):
                 # Windows event loop fallback
-                signal.signal(sig, lambda s, f: self.request_shutdown())
+                try:
+                    signal.signal(sig, lambda s, f: self.request_shutdown())
+                except (ValueError, OSError):
+                    pass
 
     def request_shutdown(self) -> None:
         """Request graceful shutdown."""
