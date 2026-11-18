@@ -21,7 +21,37 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [Sup
 logger = logging.getLogger("Supervisor")
 
 
+def ensure_local_ai_daemon() -> None:
+    """Ensure local Ollama AI daemon is active for zero-configuration startup."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:11434/api/version", timeout=1.0) as resp:
+            if resp.status == 200:
+                logger.info("Local AI inference daemon (Ollama) is online.")
+                return
+    except Exception:
+        pass
+
+    import shutil
+    ollama_path = shutil.which("ollama") or r"C:\Users\ACER\AppData\Local\Programs\Ollama\ollama.exe"
+    if os.path.exists(ollama_path):
+        logger.info("Starting local AI daemon in background: %s serve", ollama_path)
+        try:
+            subprocess.Popen(
+                [ollama_path, "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            time.sleep(2.0)
+        except Exception as e:
+            logger.warning("Could not auto-start Ollama: %s", e)
+
+
 def main() -> None:
+    # 0. Ensure local AI inference runtime is running
+    ensure_local_ai_daemon()
+
     # 1. Pre-flight check: Is ZORO halted?
     mgr = EmergencyManager()
     is_halted, halt_data = mgr.is_halted()

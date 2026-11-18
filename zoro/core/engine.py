@@ -203,6 +203,9 @@ class ZoroEngine:
         # 2. Record PID
         self.emergency_mgr.record_pid(os.getpid())
 
+        # 2b. Ensure local AI provider daemon is accessible
+        await self._ensure_local_ai_service()
+
         # 3. Initialize database & migrations
         await self.db.initialize()
 
@@ -244,6 +247,32 @@ class ZoroEngine:
         self._is_initialized = True
         logger.info("ZORO Core Engine & Intelligence Core initialized successfully.")
         return True
+
+    async def _ensure_local_ai_service(self) -> None:
+        """Ensure configured local AI engine (e.g. Ollama) is running and reachable."""
+        if self.settings.model_provider == "ollama":
+            health = await self._ollama_provider.health_check()
+            if not health.is_available:
+                import shutil
+                ollama_bin = shutil.which("ollama") or r"C:\Users\ACER\AppData\Local\Programs\Ollama\ollama.exe"
+                if os.path.exists(ollama_bin):
+                    logger.info("Auto-starting local Ollama daemon (%s serve)...", ollama_bin)
+                    try:
+                        import subprocess
+                        subprocess.Popen(
+                            [ollama_bin, "serve"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                        )
+                        for _ in range(8):
+                            await asyncio.sleep(0.5)
+                            h = await self._ollama_provider.health_check()
+                            if h.is_available:
+                                logger.info("Local Ollama daemon is ready and responding.")
+                                break
+                    except Exception as e:
+                        logger.warning("Could not auto-start Ollama daemon: %s", e)
 
     def _register_ipc_handlers(self) -> None:
         """Register JSON-RPC methods exposed to the Desktop UI."""
