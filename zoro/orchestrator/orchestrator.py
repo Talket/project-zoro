@@ -8,6 +8,7 @@ from enum import Enum
 import json
 import logging
 from pathlib import Path
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
@@ -22,6 +23,8 @@ from zoro.security.emergency import EmergencyManager
 from zoro.storage.db import DatabaseManager
 from zoro.tools.base import ApprovalStatus
 from zoro.tools.registry import ToolRegistry
+from zoro.memory.manager import MemoryManager
+from zoro.schedule.models import EventCategory, EventPriority, EventSource
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,8 @@ class ZoroOrchestrator:
         audit: Optional[AuditLogger] = None,
         event_bus: Optional[AsyncEventBus] = None,
         emergency_mgr: Optional[EmergencyManager] = None,
+        memory_mgr: Optional[MemoryManager] = None,
+        scheduler_engine: Optional[Any] = None,
     ) -> None:
         self.provider_registry = provider_registry
         self.tool_registry = tool_registry
@@ -66,6 +71,8 @@ class ZoroOrchestrator:
         self.audit = audit
         self.event_bus = event_bus
         self.emergency_mgr = emergency_mgr or EmergencyManager()
+        self.memory_mgr = memory_mgr
+        self.scheduler_engine = scheduler_engine
 
         self.planner = PlanExecutor(
             tool_registry=self.tool_registry,
@@ -305,13 +312,303 @@ class ZoroOrchestrator:
         text_lower = text.lower()
         return any(kw in text_lower for kw in keywords)
 
+    async def _handle_proactive_schedule_command(
+        self, conv_id: str, user_message: str
+    ) -> Optional[OrchestratorResponse]:
+        """
+        Detect and execute timetable, deadline, reminder, focus, and quiet hours commands.
+        Enforces strict temporal validation, ambiguity detection, and persistent memory bridging.
+        """
+        if not self.scheduler_engine:
+            return None
+
+        norm_msg = user_message.lower().strip()
+
+        # 1. Agenda and Timetable queries
+        agenda_patterns = (
+            "what do i have scheduled",
+            "what is on my agenda",
+            "what's on my agenda",
+            "today's agenda",
+            "show agenda",
+            "show timetable",
+            "what is my schedule",
+            "show my schedule",
+            "show schedule",
+            "what do i have today",
+            "my agenda",
+            "daily briefing",
+        )
+        if any(p in norm_msg for p in agenda_patterns):
+            try:
+                briefing = await self.scheduler_engine.briefing.generate_briefing()
+                msg = briefing.summary_text
+                await self._persist_message(conv_id, "assistant", msg)
+                await self.set_state(OrchestratorState.COMPLETED)
+                await self.set_state(OrchestratorState.IDLE)
+                return OrchestratorResponse(conversation_id=conv_id, message=msg, state=OrchestratorState.COMPLETED)
+            except Exception as e:
+                logger.error("Failed to generate agenda briefing: %s", e)
+
+        # 2. Top Priorities query
+        priority_patterns = (
+            "top priorities",
+            "three most urgent tasks",
+            "most urgent tasks",
+            "urgent deadlines",
+            "what are my priorities",
+            "top 3 priorities",
+            "most urgent",
+        )
+        if any(p in norm_msg for p in priority_patterns):
+            try:
+                deadlines = await self.scheduler_engine.timetable.get_upcoming_deadlines(horizon_days=7)
+                overdue = await self.scheduler_engine.timetable.get_overdue_tasks()
+                items: List[str] = []
+                for od in overdue[:2]:
+                    items.append(f"Resolve overdue item: '{od.title}' (From {od.event_date})")
+                for d in deadlines:
+                    if len(items) >= 3:
+                        break
+                    items.append(f"Address deadline: '{d.title}' (Due {d.due_date}, {d.hours_remaining:.0f}h remaining)")
+
+                if items:
+                    lines = ["Sir, here are your top operational priorities:"]
+                    for idx, it in enumerate(items, 1):
+                        lines.append(f"  {idx}. {it}")
+                    msg = "\n".join(lines)
+                else:
+                    msg = "Sir, all tasks and deadlines are currently on track. No urgent items pending."
+
+                await self._persist_message(conv_id, "assistant", msg)
+                await self.set_state(OrchestratorState.COMPLETED)
+                await self.set_state(OrchestratorState.IDLE)
+                return OrchestratorResponse(conversation_id=conv_id, message=msg, state=OrchestratorState.COMPLETED)
+            except Exception as e:
+                logger.error("Failed to query top priorities: %s", e)
+
+        # 3. Deadline Countdown query
+        countdown_patterns = ("how many days left until", "countdown to", "days until", "time left until")
+        is_countdown = any(p in norm_msg for p in countdown_patterns) or (
+            norm_msg.startswith("when is") and any(w in norm_msg for w in ("exam", "deadline", "project", "presentation", "submission", "test", "due"))
+        )
+        if is_countdown:
+            try:
+                # Extract target phrase
+                m = re.search(r"(?:until|to|for|is)\s+(?:the\s+)?([^?.,]+)", norm_msg)
+                query_subj = m.group(1).strip() if m else norm_msg
+
+                deadlines = await self.scheduler_engine.timetable.get_upcoming_deadlines(horizon_days=90)
+                match = next((d for d in deadlines if query_subj in d.title.lower() or d.title.lower() in query_subj), None)
+                if match:
+                    if match.is_overdue:
+                        msg = f"Sir, '{match.title}' is currently OVERDUE (was due on {match.due_date} at {match.due_time or '23:59'})."
+                    else:
+                        days = match.hours_remaining / 24.0
+                        msg = f"Sir, you have {days:.1f} days remaining until '{match.title}' (due on {match.due_date} at {match.due_time or '23:59'}, ~{match.hours_remaining:.0f} hours remaining)."
+                else:
+                    all_events = await self.scheduler_engine.store.list_events()
+                    ev_match = next((ev for ev in all_events if query_subj in ev.title.lower() or ev.title.lower() in query_subj), None)
+                    if ev_match:
+                        msg = f"Sir, '{ev_match.title}' is scheduled for {ev_match.event_date} at {ev_match.start_time or 'all-day'}."
+                    else:
+                        msg = f"Sir, I could not find an event or deadline matching '{query_subj}' in your schedule."
+
+                await self._persist_message(conv_id, "assistant", msg)
+                await self.set_state(OrchestratorState.COMPLETED)
+                await self.set_state(OrchestratorState.IDLE)
+                return OrchestratorResponse(conversation_id=conv_id, message=msg, state=OrchestratorState.COMPLETED)
+            except Exception as e:
+                logger.error("Failed to query countdown: %s", e)
+
+        # 4. Focus Session control
+        if "focus" in norm_msg:
+            # Start focus session
+            if any(w in norm_msg for w in ("start", "begin", "enter", "mode", "session")) and not any(w in norm_msg for w in ("stop", "end", "cancel", "status")):
+                try:
+                    dur_match = re.search(r"(\d+)\s*(?:minute|min)s?", norm_msg)
+                    duration = int(dur_match.group(1)) if dur_match else 25
+                    goal = "Deep Work"
+                    on_match = re.search(r"\bon\s+([^.,]+)", user_message)
+                    if on_match:
+                        goal = on_match.group(1).strip()
+                    else:
+                        for_match = re.search(r"\bfor\s+([^.,]+)", user_message)
+                        if for_match and not re.search(r"\d+\s*min", for_match.group(1).lower()):
+                            goal = for_match.group(1).strip()
+
+                    sess = await self.scheduler_engine.focus.start_session(duration_minutes=duration, goal=goal)
+                    msg = f"Focus session initiated for {duration} minutes (Goal: {goal}). Non-urgent notifications will be held until completion, Sir."
+                    await self._persist_message(conv_id, "assistant", msg)
+                    await self.set_state(OrchestratorState.COMPLETED)
+                    await self.set_state(OrchestratorState.IDLE)
+                    return OrchestratorResponse(conversation_id=conv_id, message=msg, state=OrchestratorState.COMPLETED)
+                except Exception as e:
+                    logger.error("Failed to start focus session: %s", e)
+
+            # Stop focus session
+            elif any(w in norm_msg for w in ("stop", "end", "cancel", "terminate", "exit", "finish")):
+                try:
+                    await self.scheduler_engine.focus.stop_session()
+                    msg = "Focus session concluded. Standard notification delivery restored, Sir."
+                    await self._persist_message(conv_id, "assistant", msg)
+                    await self.set_state(OrchestratorState.COMPLETED)
+                    await self.set_state(OrchestratorState.IDLE)
+                    return OrchestratorResponse(conversation_id=conv_id, message=msg, state=OrchestratorState.COMPLETED)
+                except Exception as e:
+                    logger.error("Failed to stop focus session: %s", e)
+
+        # 5. Quiet Hours configuration
+        if "quiet hours" in norm_msg or "don't disturb" in norm_msg or "do not disturb" in norm_msg:
+            try:
+                times = re.findall(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b", norm_msg)
+                if len(times) >= 2:
+                    t1, _ = self.scheduler_engine.parser._extract_time(times[0])
+                    t2, _ = self.scheduler_engine.parser._extract_time(times[1])
+                    if t1 and t2:
+                        cfg = await self.scheduler_engine.store.get_settings()
+                        cfg.quiet_hours_enabled = True
+                        cfg.quiet_hours_start = t1
+                        cfg.quiet_hours_end = t2
+                        await self.scheduler_engine.store.save_settings(cfg)
+                        msg = f"Quiet hours configured from {t1} to {t2}. Non-urgent notifications will be suppressed during this window, Sir."
+                    else:
+                        msg = "Please specify valid start and end times for quiet hours, Sir (e.g., 'quiet hours from 22:00 to 08:00')."
+                else:
+                    msg = "Please specify both start and end times for quiet hours, Sir (e.g., 'don't disturb me between 22:00 and 08:00')."
+
+                await self._persist_message(conv_id, "assistant", msg)
+                await self.set_state(OrchestratorState.COMPLETED)
+                await self.set_state(OrchestratorState.IDLE)
+                return OrchestratorResponse(conversation_id=conv_id, message=msg, state=OrchestratorState.COMPLETED)
+            except Exception as e:
+                logger.error("Failed to configure quiet hours: %s", e)
+
+        # 6. Reminder / Event Creation
+        reminder_intents = ("remind me to", "remind me about", "remind me", "schedule a", "schedule an", "create event", "set a reminder", "set reminder")
+        if any(norm_msg.startswith(intent) or f" {intent}" in norm_msg for intent in reminder_intents):
+            try:
+                parse_res = self.scheduler_engine.parser.parse_scheduling_prompt(user_message)
+                # Ambiguity check: user requested a reminder/event but gave no time or date
+                if parse_res.is_ambiguous or (not parse_res.event_date and not parse_res.start_time):
+                    msg = "When would you like me to schedule this reminder, Sir? Please specify the date and time."
+                    await self._persist_message(conv_id, "assistant", msg)
+                    await self.set_state(OrchestratorState.COMPLETED)
+                    await self.set_state(OrchestratorState.IDLE)
+                    return OrchestratorResponse(conversation_id=conv_id, message=msg, state=OrchestratorState.COMPLETED)
+
+                title = parse_res.extracted_title or "Scheduled Task"
+                date_str = parse_res.event_date
+                time_str = parse_res.start_time
+
+                # Classify category
+                cat = EventCategory.GENERAL_TASKS
+                if any(w in norm_msg for w in ("exam", "test", "midterm", "final", "quiz")):
+                    cat = EventCategory.EXAMS
+                elif any(w in norm_msg for w in ("college", "class", "lecture", "course", "lab")):
+                    cat = EventCategory.COLLEGE
+                elif any(w in norm_msg for w in ("assignment", "homework", "submission", "submit")):
+                    cat = EventCategory.ASSIGNMENTS
+                elif any(w in norm_msg for w in ("project", "code", "repo", "build")):
+                    cat = EventCategory.PROJECTS
+                elif any(w in norm_msg for w in ("meet", "call", "interview", "sync", "conference")):
+                    cat = EventCategory.MEETINGS
+                elif any(w in norm_msg for w in ("workout", "gym", "doctor", "medicine", "pill", "lunch", "dinner")):
+                    cat = EventCategory.PERSONAL
+
+                pri = EventPriority.HIGH if any(w in norm_msg for w in ("urgent", "important", "critical", "asap")) else EventPriority.MEDIUM
+
+                offsets = [parse_res.reminder_offset_minutes] if parse_res.reminder_offset_minutes > 0 else [0]
+                ev = await self.scheduler_engine.timetable.add_event_with_reminders(
+                    title=title,
+                    event_date=date_str,
+                    start_time=time_str,
+                    category=cat,
+                    priority=pri,
+                    reminder_offsets=offsets,
+                )
+
+                # Bridge into Persistent Memory under SCHEDULE
+                if self.memory_mgr:
+                    try:
+                        from zoro.memory.models import MemoryCategory, MemoryCreate, MemorySource
+                        await self.memory_mgr.store.create_memory(
+                            MemoryCreate(
+                                category=MemoryCategory.SCHEDULE,
+                                content=f"Scheduled {ev.category.value.lower()}: '{ev.title}' on {ev.event_date} at {ev.start_time or 'all-day'}.",
+                                source=MemorySource.EXTRACTED_CONVERSATION,
+                                event_timestamp=f"{ev.event_date}T{ev.start_time or '09:00'}:00",
+                                importance=0.7,
+                                metadata={"event_id": ev.id, "category": ev.category.value},
+                            )
+                        )
+                    except Exception as mem_err:
+                        logger.warning("Failed to bridge schedule event to memory: %s", mem_err)
+
+                msg = f"Certainly, Sir. I have scheduled a reminder for '{ev.title}' on {ev.event_date} at {ev.start_time}."
+                await self._persist_message(conv_id, "assistant", msg)
+                await self.set_state(OrchestratorState.COMPLETED)
+                await self.set_state(OrchestratorState.IDLE)
+                return OrchestratorResponse(conversation_id=conv_id, message=msg, state=OrchestratorState.COMPLETED)
+            except Exception as e:
+                logger.error("Failed to process reminder command: %s", e)
+
+        return None
+
     async def _handle_direct_conversation(
         self, conv_id: str, user_message: str
     ) -> OrchestratorResponse:
+        # Check for proactive schedule commands (agenda, deadlines, focus, reminders)
+        sched_resp = await self._handle_proactive_schedule_command(conv_id, user_message)
+        if sched_resp is not None:
+            return sched_resp
+
         # Build prompt with history (fetch up to 12 most recent messages in chronological order)
         history = await self._load_conversation_history(conv_id, limit=12)
+
+        # Retrieve relevant memory context if MemoryManager is configured
+        memory_context = ""
+        if self.memory_mgr:
+            try:
+                memory_context = await self.memory_mgr.get_context_for_prompt(user_message)
+            except Exception as e:
+                logger.warning("Memory context retrieval failed: %s", e)
+
+        # Retrieve proactive schedule context if SchedulerEngine is configured
+        schedule_context = ""
+        if self.scheduler_engine:
+            try:
+                sched_lines = []
+                focus_sess = await self.scheduler_engine.focus.get_active_session()
+                if focus_sess:
+                    sched_lines.append(f"• Active Focus Session: '{focus_sess.goal}' ({focus_sess.duration_minutes}m)")
+
+                today_events = await self.scheduler_engine.timetable.get_todays_agenda()
+                if today_events:
+                    sched_lines.append(f"• Today's Agenda ({len(today_events)} items):")
+                    for ev in today_events[:3]:
+                        t_str = f"at {ev.start_time}" if ev.start_time else "all-day"
+                        sched_lines.append(f"  - [{ev.category.value}] {ev.title} ({t_str})")
+
+                deadlines = await self.scheduler_engine.timetable.get_upcoming_deadlines(horizon_days=3)
+                if deadlines:
+                    sched_lines.append(f"• Urgent Deadlines ({len(deadlines)} upcoming):")
+                    for d in deadlines[:2]:
+                        sched_lines.append(f"  - {d.title} (due {d.due_date}, {d.hours_remaining:.0f}h remaining)")
+
+                if sched_lines:
+                    schedule_context = "=== PROACTIVE TIMETABLE CONTEXT ===\n" + "\n".join(sched_lines)
+            except Exception as e:
+                logger.warning("Schedule context retrieval failed: %s", e)
+
+        system_content = "You are ZORO, a sophisticated and loyal personal artificial intelligence assistant."
+        if memory_context:
+            system_content += f"\n\n{memory_context}"
+        if schedule_context:
+            system_content += f"\n\n{schedule_context}"
+
         messages = [
-            ChatMessage(role="system", content="You are ZORO, a sophisticated and loyal personal artificial intelligence assistant.")
+            ChatMessage(role="system", content=system_content)
         ]
         
         # Ensure the prompt ends with the current user message
@@ -336,7 +633,37 @@ class ZoroOrchestrator:
             # If active provider returned default mock string, enrich conversational queries with real dynamic answers
             if reply == "Mock response from ZORO Model Subsystem.":
                 norm_msg = user_message.lower().strip()
-                if "time" in norm_msg:
+                if "remember" in norm_msg and any(q in norm_msg for q in ("what", "tell", "show", "list")):
+                    if memory_context:
+                        reply = f"Here is what I have in my persistent memory:\n{memory_context}"
+                    else:
+                        reply = "I currently have no stored memories matching that query."
+                elif "preference" in norm_msg or "prefer" in norm_msg:
+                    if memory_context and "Preference" in memory_context:
+                        reply = f"Based on my memory records:\n{memory_context}"
+                    else:
+                        reply = "I do not have that preference recorded yet."
+                elif "project" in norm_msg:
+                    if memory_context and "Project" in memory_context:
+                        reply = f"Regarding your projects:\n{memory_context}"
+                    else:
+                        reply = "I do not have details on that project yet."
+                elif "who am i" in norm_msg or "my name" in norm_msg:
+                    if memory_context and "Identity" in memory_context:
+                        reply = f"Based on my identity records:\n{memory_context}"
+                    else:
+                        reply = "I do not have your name recorded yet."
+                elif "schedule" in norm_msg or "agenda" in norm_msg:
+                    if schedule_context:
+                        reply = f"Here is your current timetable context:\n{schedule_context}"
+                    else:
+                        reply = "You have no events scheduled for today, Sir."
+                elif "focus" in norm_msg:
+                    if schedule_context and "Focus Session" in schedule_context:
+                        reply = f"Status:\n{schedule_context}"
+                    else:
+                        reply = "There is currently no active focus session, Sir."
+                elif "time" in norm_msg:
                     from datetime import datetime
                     reply = f"The current time is {datetime.now().strftime('%I:%M %p')}."
                 elif "date" in norm_msg or "today" in norm_msg:
@@ -348,6 +675,13 @@ class ZoroOrchestrator:
                     reply = "All systems are operational. Core engine, desktop shell, and voice interaction are online."
                 elif any(g in norm_msg for g in ("hello", "hi", "hey")):
                     reply = "Hello. I am listening and ready to assist you."
+
+            # Asynchronously extract and persist memories from this turn
+            if self.memory_mgr:
+                try:
+                    await self.memory_mgr.process_turn(user_message, reply)
+                except Exception as e:
+                    logger.warning("Memory turn extraction failed: %s", e)
 
             await self._persist_message(conv_id, "assistant", reply)
             await self.set_state(OrchestratorState.COMPLETED)

@@ -26,6 +26,14 @@ from zoro.security.audit import AuditLogger
 from zoro.security.emergency import EmergencyManager
 from zoro.security.permissions import PermissionGate
 from zoro.storage.db import DatabaseManager
+from zoro.memory import (
+    MemoryCategory,
+    MemoryCreate,
+    MemoryFilter,
+    MemoryManager,
+    MemorySource,
+    MemoryUpdate,
+)
 from zoro.computer.apps import ApplicationController, ApplicationLauncher, ApplicationRegistry
 from zoro.computer.filesystem import PathSecurityValidator, SecureFilesystemAgent
 from zoro.computer.filesystem.models import FileRiskTier
@@ -59,6 +67,23 @@ from zoro.tools.builtin.file_tools import (
     FileMoveTool,
     FileReadMetadataTool,
     ReportGeneratorTool,
+)
+from zoro.schedule import (
+    DailyBriefing,
+    EventCategory,
+    EventCompletionStatus,
+    EventPriority,
+    EventRecurrence,
+    FocusSessionStatus,
+    SchedulerEngine,
+)
+from zoro.tools.builtin.schedule_tools import (
+    ConfigureQuietHoursTool,
+    ListEventsTool,
+    QueryAgendaTool,
+    ScheduleEventTool,
+    SetReminderTool,
+    StartFocusSessionTool,
 )
 from zoro.tools.registry import ToolRegistry
 from zoro.voice import VoiceManager
@@ -117,7 +142,10 @@ class ZoroEngine:
             db=self.db,
         )
 
-        # 4. Central Orchestrator
+        # 4. Central Orchestrator & Persistent Memory Architecture (Milestone 05)
+        self.memory_mgr = MemoryManager(
+            db_path=str(self.settings.db_path),
+        )
         self.orchestrator = ZoroOrchestrator(
             provider_registry=self.provider_registry,
             tool_registry=self.tool_registry,
@@ -125,6 +153,7 @@ class ZoroEngine:
             audit=self.audit,
             event_bus=self.event_bus,
             emergency_mgr=self.emergency_mgr,
+            memory_mgr=self.memory_mgr,
         )
 
         # ---------------------------------------------------------
@@ -163,6 +192,19 @@ class ZoroEngine:
             event_bus=self.event_bus,
             emergency_mgr=self.emergency_mgr,
         )
+
+        # ---------------------------------------------------------
+        # Proactive Intelligence & Timetable Subsystem (Milestone 06)
+        # ---------------------------------------------------------
+        self.scheduler = SchedulerEngine(
+            db_path=str(self.settings.db_path),
+            event_bus_publisher=self.event_bus.publish,
+            tts_speaker=self._speak_tts_safe,
+            emergency_mgr=self.emergency_mgr,
+            instance_id=f"engine-{self.settings.instance_id}",
+        )
+        self.orchestrator.scheduler_engine = self.scheduler
+
         self._register_default_tools()
 
         self._telemetry_task: Optional[asyncio.Task] = None
@@ -187,6 +229,22 @@ class ZoroEngine:
         self.tool_registry.register(ShellExecuteTool(self.command_runner))
         self.tool_registry.register(AppLaunchTool(self.app_launcher))
         self.tool_registry.register(AppCloseTool(self.app_controller))
+
+        # Milestone 06 Proactive Scheduling Tools
+        self.tool_registry.register(ScheduleEventTool(self.scheduler.timetable))
+        self.tool_registry.register(ListEventsTool(self.scheduler.timetable))
+        self.tool_registry.register(QueryAgendaTool(self.scheduler.briefing, self.scheduler.timetable))
+        self.tool_registry.register(SetReminderTool(self.scheduler.timetable))
+        self.tool_registry.register(StartFocusSessionTool(self.scheduler.focus))
+        self.tool_registry.register(ConfigureQuietHoursTool(self.scheduler.store))
+
+    def _speak_tts_safe(self, text: str) -> None:
+        """Helper to invoke voice TTS safely in background."""
+        if hasattr(self, "voice_mgr"):
+            try:
+                asyncio.create_task(self.voice_mgr.speak(text))
+            except Exception as e:
+                logger.debug("TTS speak invocation failed: %s", e)
 
     async def initialize(self) -> bool:
         """Run pre-flight checks and initialize all engine subsystems."""
@@ -230,9 +288,15 @@ class ZoroEngine:
         await self.event_bus.subscribe("voice.speaking_started", self._on_voice_event)
         await self.event_bus.subscribe("voice.speaking_finished", self._on_voice_event)
         await self.event_bus.subscribe("voice.interrupted", self._on_voice_event)
+        await self.event_bus.subscribe("schedule.alert", self._on_schedule_event)
+        await self.event_bus.subscribe("schedule.briefing", self._on_schedule_event)
 
         # 6b. Initialize voice subsystem
         await self.voice_mgr.initialize()
+
+        # 6c. Initialize proactive scheduling subsystem (Milestone 06)
+        await self.scheduler.initialize()
+        await self.scheduler.start()
 
         # 7. Register IPC JSON-RPC handlers
         self._register_ipc_handlers()
@@ -343,6 +407,37 @@ class ZoroEngine:
         self.ipc_server.register_handler("voice.push_to_talk", self._rpc_voice_start_push_to_talk)
         self.ipc_server.register_handler("voice.configure_wake_phrase", self._rpc_voice_set_wake_word)
         self.ipc_server.register_handler("voice.set_wake_listening", self._rpc_voice_set_wake_listening_alias)
+
+        # ---------------------------------------------------------
+        # Milestone 05 Personal Memory Handlers
+        # ---------------------------------------------------------
+        self.ipc_server.register_handler("memory.get_all", self._rpc_memory_get_all)
+        self.ipc_server.register_handler("memory.search", self._rpc_memory_search)
+        self.ipc_server.register_handler("memory.create", self._rpc_memory_create)
+        self.ipc_server.register_handler("memory.update", self._rpc_memory_update)
+        self.ipc_server.register_handler("memory.delete", self._rpc_memory_delete)
+        self.ipc_server.register_handler("memory.delete_category", self._rpc_memory_delete_category)
+        self.ipc_server.register_handler("memory.clear_all", self._rpc_memory_clear_all)
+
+        # ---------------------------------------------------------
+        # Milestone 06 Proactive Timetable & Schedule Handlers
+        # ---------------------------------------------------------
+        self.ipc_server.register_handler("schedule.create_event", self._rpc_schedule_create_event)
+        self.ipc_server.register_handler("schedule.list_events", self._rpc_schedule_list_events)
+        self.ipc_server.register_handler("schedule.get_event", self._rpc_schedule_get_event)
+        self.ipc_server.register_handler("schedule.update_event", self._rpc_schedule_update_event)
+        self.ipc_server.register_handler("schedule.delete_event", self._rpc_schedule_delete_event)
+        self.ipc_server.register_handler("schedule.get_briefing", self._rpc_schedule_get_briefing)
+        self.ipc_server.register_handler("schedule.get_deadlines", self._rpc_schedule_get_deadlines)
+        self.ipc_server.register_handler("schedule.get_settings", self._rpc_schedule_get_settings)
+        self.ipc_server.register_handler("schedule.update_settings", self._rpc_schedule_update_settings)
+        self.ipc_server.register_handler("schedule.start_focus", self._rpc_schedule_start_focus)
+        self.ipc_server.register_handler("schedule.stop_focus", self._rpc_schedule_stop_focus)
+        self.ipc_server.register_handler("schedule.get_focus_status", self._rpc_schedule_get_focus_status)
+        self.ipc_server.register_handler("schedule.list_notifications", self._rpc_schedule_list_notifications)
+        self.ipc_server.register_handler("schedule.clear_notifications", self._rpc_schedule_clear_notifications)
+        self.ipc_server.register_handler("schedule.snooze_reminder", self._rpc_schedule_snooze_reminder)
+        self.ipc_server.register_handler("schedule.dismiss_reminder", self._rpc_schedule_dismiss_reminder)
 
     # ---------------------------------------------------------
     # Foundation RPC Implementations
@@ -911,6 +1006,226 @@ class ZoroEngine:
             return await self._rpc_voice_stop_listening(params)
 
     # ---------------------------------------------------------
+    # Milestone 05 Personal Memory RPC Handlers
+    # ---------------------------------------------------------
+    async def _rpc_memory_get_all(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        cat_str = params.get("category")
+        cat = MemoryCategory(cat_str) if cat_str else None
+        filt = MemoryFilter(
+            category=cat,
+            project_name=params.get("project_name"),
+            include_deleted=params.get("include_deleted", False),
+            limit=params.get("limit", 100),
+            offset=params.get("offset", 0),
+        )
+        items = await self.memory_mgr.store.get_all(filt)
+        return {"success": True, "memories": [item.model_dump() for item in items]}
+
+    async def _rpc_memory_search(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        query = params.get("query", "")
+        cat_str = params.get("category")
+        cat = MemoryCategory(cat_str) if cat_str else None
+        limit = params.get("limit", 10)
+        min_score = params.get("min_score", 0.20)
+        results = await self.memory_mgr.store.search(
+            query=query,
+            category=cat,
+            project_name=params.get("project_name"),
+            limit=limit,
+            min_score=min_score,
+        )
+        return {
+            "success": True,
+            "results": [
+                {
+                    "memory": r.memory.model_dump(),
+                    "score": r.score,
+                    "match_type": r.match_type,
+                }
+                for r in results
+            ],
+        }
+
+    async def _rpc_memory_create(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        cat = MemoryCategory(params.get("category", "EPISODIC"))
+        item = await self.memory_mgr.store.create_memory(
+            MemoryCreate(
+                category=cat,
+                content=params.get("content", ""),
+                summary=params.get("summary"),
+                importance=params.get("importance", 0.5),
+                confidence=params.get("confidence", 1.0),
+                source=MemorySource.USER_EDIT,
+                project_name=params.get("project_name"),
+                event_timestamp=params.get("event_timestamp"),
+            )
+        )
+        return {"success": True, "memory": item.model_dump()}
+
+    async def _rpc_memory_update(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        mem_id = params.get("id")
+        if not mem_id:
+            return {"success": False, "error": "Missing memory id"}
+        updated = await self.memory_mgr.store.update_memory(
+            mem_id,
+            MemoryUpdate(
+                content=params.get("content"),
+                summary=params.get("summary"),
+                importance=params.get("importance"),
+                confidence=params.get("confidence"),
+                project_name=params.get("project_name"),
+                event_timestamp=params.get("event_timestamp"),
+                source=MemorySource.USER_EDIT,
+            ),
+        )
+        if not updated:
+            return {"success": False, "error": "Memory not found"}
+        return {"success": True, "memory": updated.model_dump()}
+
+    async def _rpc_memory_delete(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        mem_id = params.get("id")
+        hard = params.get("hard_delete", False)
+        if not mem_id:
+            return {"success": False, "error": "Missing memory id"}
+        ok = await self.memory_mgr.store.delete_memory(mem_id, hard_delete=hard)
+        return {"success": ok}
+
+    async def _rpc_memory_delete_category(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        cat_str = params.get("category")
+        if not cat_str:
+            return {"success": False, "error": "Missing category"}
+        cat = MemoryCategory(cat_str)
+        count = await self.memory_mgr.store.delete_by_category(cat)
+        return {"success": True, "deleted_count": count}
+
+    async def _rpc_memory_clear_all(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        phrase = params.get("confirmation_phrase", "")
+        try:
+            count = await self.memory_mgr.store.clear_all_memories(phrase)
+            return {"success": True, "deleted_count": count}
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+
+    # ---------------------------------------------------------
+    # Milestone 06 Proactive Schedule RPC Implementations
+    # ---------------------------------------------------------
+    async def _rpc_schedule_create_event(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        cat_str = str(params.get("category", "GENERAL_TASKS")).upper()
+        pri_str = str(params.get("priority", "MEDIUM")).upper()
+        rec_str = str(params.get("recurrence", "NONE")).upper()
+        cat = EventCategory(cat_str) if cat_str in EventCategory.__members__ else EventCategory.GENERAL_TASKS
+        pri = EventPriority(pri_str) if pri_str in EventPriority.__members__ else EventPriority.MEDIUM
+        rec = EventRecurrence(rec_str) if rec_str in EventRecurrence.__members__ else EventRecurrence.NONE
+
+        event = await self.scheduler.timetable.add_event_with_reminders(
+            title=params["title"],
+            event_date=params["event_date"],
+            start_time=params.get("start_time"),
+            end_time=params.get("end_time"),
+            category=cat,
+            priority=pri,
+            recurrence=rec,
+            reminder_offsets=params.get("reminder_offsets", [0]),
+            description=params.get("description"),
+        )
+        return {"success": True, "event": event.model_dump()}
+
+    async def _rpc_schedule_list_events(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        cat_str = params.get("category")
+        cat = EventCategory(cat_str) if cat_str and cat_str in EventCategory.__members__ else None
+        events = await self.scheduler.store.list_events(
+            category=cat,
+            date_from=params.get("date_from"),
+            date_to=params.get("date_to"),
+            limit=params.get("limit", 50),
+        )
+        return {"success": True, "events": [e.model_dump() for e in events]}
+
+    async def _rpc_schedule_get_event(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        ev_id = params.get("event_id")
+        if not ev_id:
+            return {"success": False, "error": "Missing event_id"}
+        ev = await self.scheduler.store.get_event(ev_id)
+        return {"success": True, "event": ev.model_dump() if ev else None}
+
+    async def _rpc_schedule_update_event(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        ev_id = params.get("event_id")
+        if not ev_id:
+            return {"success": False, "error": "Missing event_id"}
+        from zoro.schedule.models import EventUpdate
+        updated = await self.scheduler.store.update_event(ev_id, EventUpdate(**params.get("updates", {})))
+        return {"success": True, "event": updated.model_dump() if updated else None}
+
+    async def _rpc_schedule_delete_event(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        ev_id = params.get("event_id")
+        if not ev_id:
+            return {"success": False, "error": "Missing event_id"}
+        ok = await self.scheduler.store.delete_event(ev_id, hard_delete=params.get("hard_delete", False))
+        return {"success": ok}
+
+    async def _rpc_schedule_get_briefing(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        briefing = await self.scheduler.briefing.generate_briefing()
+        return {"success": True, "summary": briefing.summary_text, "briefing": briefing.model_dump()}
+
+    async def _rpc_schedule_get_deadlines(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        deadlines = await self.scheduler.timetable.get_upcoming_deadlines(horizon_days=params.get("horizon_days", 7))
+        return {"success": True, "deadlines": [d.model_dump() for d in deadlines]}
+
+    async def _rpc_schedule_get_settings(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        settings = await self.scheduler.store.get_settings()
+        return settings.model_dump()
+
+    async def _rpc_schedule_update_settings(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        updated = await self.scheduler.store.update_settings(params)
+        return {"success": True, "settings": updated.model_dump()}
+
+    async def _rpc_schedule_start_focus(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        task = params.get("task_focus", "Deep Work")
+        mins = int(params.get("duration_minutes", 25))
+        session = await self.scheduler.focus.start_session(task_focus=task, duration_minutes=mins)
+        return {"success": True, "session": session.model_dump()}
+
+    async def _rpc_schedule_stop_focus(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        stopped = await self.scheduler.focus.stop_session_early()
+        return {"success": True, "session": stopped.model_dump() if stopped else None}
+
+    async def _rpc_schedule_get_focus_status(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        session = await self.scheduler.focus.get_active_session()
+        rem = await self.scheduler.focus.get_remaining_minutes()
+        return {
+            "active": session is not None,
+            "session": session.model_dump() if session else None,
+            "remaining_minutes": rem or 0.0,
+            "task_focus": session.task_focus if session else "",
+        }
+
+    async def _rpc_schedule_list_notifications(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        notifs = await self.scheduler.store.list_notifications(limit=params.get("limit", 50))
+        return {"success": True, "notifications": [n.model_dump() for n in notifs]}
+
+    async def _rpc_schedule_clear_notifications(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        import aiosqlite
+        async with aiosqlite.connect(self.scheduler.store.db_path) as conn:
+            cursor = await conn.execute("DELETE FROM notification_history;")
+            await conn.commit()
+            count = cursor.rowcount
+        return {"success": True, "deleted_count": count}
+
+    async def _rpc_schedule_snooze_reminder(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        rem_id = params.get("reminder_id")
+        mins = int(params.get("snooze_minutes", 10))
+        import datetime as dt_mod
+        snooze_utc = (datetime.now(timezone.utc) + dt_mod.timedelta(minutes=mins)).isoformat()
+        ok = await self.scheduler.store.snooze_reminder(rem_id, snooze_utc)
+        return {"success": ok}
+
+    async def _rpc_schedule_dismiss_reminder(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        rem_id = params.get("reminder_id")
+        now_utc = datetime.now(timezone.utc).isoformat()
+        ok = await self.scheduler.store.dismiss_reminder(rem_id, now_utc)
+        return {"success": ok}
+
+    # ---------------------------------------------------------
     # Event Bus Handlers for Real-Time UI Broadcasting
     # ---------------------------------------------------------
     async def _on_orchestrator_state_changed(self, topic: str, payload: Dict[str, Any]) -> None:
@@ -923,6 +1238,9 @@ class ZoroEngine:
         self.ipc_server.broadcast_notification("ai.step_update", payload)
 
     async def _on_voice_event(self, topic: str, payload: Dict[str, Any]) -> None:
+        self.ipc_server.broadcast_notification(topic, payload)
+
+    async def _on_schedule_event(self, topic: str, payload: Dict[str, Any]) -> None:
         self.ipc_server.broadcast_notification(topic, payload)
 
     async def _telemetry_loop(self) -> None:
@@ -967,6 +1285,12 @@ class ZoroEngine:
             await self.voice_mgr.shutdown()
         except Exception as e:
             logger.error("Error shutting down voice manager: %s", e)
+
+        # Shutdown proactive scheduler engine (Milestone 06)
+        try:
+            await self.scheduler.stop()
+        except Exception as e:
+            logger.error("Error stopping scheduler engine: %s", e)
 
         # Cancel telemetry task
         if self._telemetry_task:

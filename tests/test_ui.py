@@ -251,3 +251,34 @@ def test_ui_ipc_worker_run_and_exit_app(qapp, test_settings):
         app.exit_app()
 
 
+def test_main_window_scrollable_layout(qapp, test_settings):
+    """Verify that ZoroMainWindow features a responsive, scrollable architecture with pinned bars."""
+    from PySide6.QtWidgets import QScrollArea
+    win = ZoroMainWindow(settings=test_settings)
+    win.show()
+
+    # 1. Verify QScrollArea exists and is properly configured
+    assert hasattr(win, "scroll_area")
+    assert isinstance(win.scroll_area, QScrollArea)
+    assert win.scroll_area.widgetResizable() is True
+    assert win.scroll_area.widget() == win.scroll_content
+
+    # 2. Verify pinned header and action bar are outside the scroll area in central_layout
+    central_layout = win.centralWidget().layout()
+    assert central_layout.count() == 3
+    assert central_layout.itemAt(0).widget().objectName() == "headerContainer"
+    assert central_layout.itemAt(1).widget() == win.scroll_area
+    assert central_layout.itemAt(2).widget().objectName() == "actionContainer"
+
+    # 3. Verify critical bottom actions remain pinned outside the scroll area
+    assert win.btn_emergency.parentWidget().objectName() == "actionContainer"
+    assert win.btn_memory_mgr.parentWidget().objectName() == "actionContainer"
+    assert win.btn_clear_log.parentWidget().objectName() == "actionContainer"
+
+    # 4. Verify scrollability: vertical scrollbar responds to value changes
+    scrollbar = win.scroll_area.verticalScrollBar()
+    scrollbar.setValue(50)
+    assert scrollbar.value() == min(50, scrollbar.maximum())
+
+
+

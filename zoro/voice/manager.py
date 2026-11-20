@@ -173,6 +173,17 @@ class VoiceManager:
         self.pipeline.enable()
         return True
 
+    @property
+    def is_enabled(self) -> bool:
+        """Return whether voice interaction pipeline is enabled."""
+        return self.pipeline.is_enabled
+
+    async def speak(self, text: str) -> None:
+        """Synthesize and speak text aloud through audio playback."""
+        if self._check_emergency_halt():
+            return
+        await self.turn_mgr._speak_response(text)
+
     def disable(self) -> bool:
         """Disable voice interaction."""
         self.pipeline.disable()

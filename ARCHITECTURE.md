@@ -88,8 +88,11 @@ PROJECT ZORO is engineered as an autonomous personal intelligence designed to ru
   - Child processes cannot breakaway, inherit job handles, or remove themselves from the job.
   - When the supervisor process exits, crashes, or is terminated by the emergency controller, the Windows NT kernel closes the sole handle in existence and terminates all descendant processes immediately.
   - *Scope Note*: Direct subprocesses are strictly contained; processes spawned via out-of-band external brokers (COM, WMI, Task Scheduler) execute outside the process tree.
-- **Hard Kill Switch**:
-  - Standalone controller `scripts/emergency_kill.py` terminates the supervisor process tree via `taskkill /F /T /PID`.
+- **Hard Kill Switch & Global Hotkey**:
+  - Standalone controller `scripts/emergency_kill.py` terminates the supervisor process tree via handle-bound `TerminateProcess` with creation `FILETIME` validation.
+  - Desktop HUD Emergency Hard Kill button invokes `EmergencyManager.trigger_emergency_kill()` immediately.
+  - System-wide global keyboard shortcut `Ctrl + Alt + Shift + K` registered via Win32 `RegisterHotKey` on a dedicated message-pump thread, ensuring instant termination across all Windows applications even when HUD is minimized or unfocused.
+  - In-focus Qt accelerator `QShortcut` provides redundant fallback within the desktop shell.
   - Terminating the supervisor closes the unnamed Job Object handle, triggering kernel-level `KILL_ON_JOB_CLOSE`.
 - **Halt State Immutability & Resumption**:
   - The halt file is placed in `%PROGRAMDATA%\Zoro\Security\halt.lock` (or repository data directory).
@@ -222,3 +225,55 @@ PROJECT ZORO is engineered as an autonomous personal intelligence designed to ru
   - Registers 9 builtin computer tools: `WindowListTool`, `WindowFocusTool`, `ScreenCaptureTool`, `ScreenOCRTool`, `ElementInspectTool`, `ElementActionTool`, `ShellExecuteTool`, `AppLaunchTool`, `AppCloseTool`.
 - **Desktop HUD Integration**:
   - Adds dedicated Computer Control & Sandbox Panel with profile selector, screenshot capture, offline OCR trigger, and window listing.
+
+### 3.13 Persistent Personal Memory Architecture (`zoro.memory`)
+- **Multi-Tiered Memory Storage (`zoro.memory.store`)**:
+  - 5 Architectural Categories: `IDENTITY` (owner profile), `PREFERENCE` (working style, tools), `PROJECT` (project names, architecture), `SCHEDULE` (deadlines, dates), and `EPISODIC` (past decisions and completed milestones).
+  - Backed by SQLite migration `006_persistent_memory.sql` (`memories` table with UUIDv4 keys, importance/confidence scores, and `memories_fts` FTS5 virtual table).
+  - Soft delete support (`is_deleted = 1`) with audit trail preservation, and strict security guards on bulk deletions requiring confirmation phrase `CONFIRM_CLEAR_ALL_MEMORIES`.
+- **Local Dense Vector Embeddings (`zoro.memory.embeddings`)**:
+  - Pinned to local Ollama `all-minilm` (384-dimensional dense vectors, ~45 MB footprint, ~340 ms warm latency, 0 VRAM contention with `qwen2.5:3b`).
+  - Includes offline deterministic fallback projector to guarantee 100% operational continuity during model restarts.
+  - Hybrid Search combining dense vector cosine similarity ($0.7$ weight) and SQLite FTS5 BM25 keyword matching ($0.3$ weight).
+- **Conversational Memory Extraction Engine (`zoro.memory.extractor`)**:
+  - Real-time extraction of structured facts, explicit instructions (`Remember that...`, `Update my preference to...`, `Forget that...`), and schedule items.
+  - Strict security credential filtering: RegEx & entropy scanners block passwords, private keys, and API tokens from persistence.
+  - Prompt injection neutralization: Strips instruction override delimiters to treat memory content purely as untrusted data.
+  - Deduplication and contradiction resolution: Automatically updates existing preferences and identity records rather than creating conflicting duplicates.
+- **Context-Aware Prompt Grounding (`zoro.memory.context_builder`)**:
+  - Injects budgeted (`max_tokens = 600`) structured `<PERSISTENT_MEMORY>` blocks into the central Orchestrator system prompt.
+  - Explicit grounding directives instruct the LLM to personalize responses based on verified stored memories and distinguish between known facts and unknown details.
+- **Desktop HUD Memory Management Panel (`zoro.ui.memory_panel`)**:
+  - Interactive table displaying ID, category, content, importance, source, and creation timestamps.
+  - Real-time category filtering (`ALL`, `IDENTITY`, `PREFERENCE`, `PROJECT`, `SCHEDULE`, `EPISODIC`) and hybrid search bar.
+  - Interactive Add, Edit, Delete Single, Delete Category, and Security-Guarded Clear All dialogs.
+
+### 3.14 Proactive Intelligence & Timetable Awareness (`zoro.schedule`)
+- **Crash-Safe Persistent Reminder Dispatching (`zoro.schedule.store`)**:
+  - Decoupled `events` and `reminders` tables via migration `007_proactive_schedule.sql` (1-to-many relationship with cascading foreign keys).
+  - Atomic reminder claiming inside SQLite transactions using `BEGIN IMMEDIATE` with `rowcount == 1` validation, worker attribution, and stale claim recovery (60-second cutoff).
+  - Timezone persistence in `schedule_settings` table (initial `Asia/Kolkata`, fully configurable without permanent hardcoding).
+- **Deterministic Temporal Parsing & Recurrence (`zoro.schedule.parser`)**:
+  - Deterministic parsing for relative offsets ("in 30 mins"), absolute times ("at 14:30", "at 9:30 AM"), and dates ("tomorrow", "Dec 25").
+  - Zero-Hallucination Ambiguity Detection: Commands requesting reminders/events lacking time/date details return `is_ambiguous=True` and prompt the user for clarification rather than inventing calendar values.
+  - Non-Drifting Monthly Recurrence Clamping: Preserves original `target_day_of_month` across month-end transitions (e.g. Jan 31 -> Feb 28 -> Mar 31).
+- **Timetable & Deadline Urgency Intelligence (`zoro.schedule.timetable`)**:
+  - Agenda organization, overdue task identification, and scheduling conflict detection.
+  - Dynamic deadline urgency scoring ($W_{priority} \times \frac{1}{\max(0.1, \text{hours\_remaining})}$) ranking top operational priorities.
+- **Multi-Tiered Notification Hierarchy & Quiet Hours (`zoro.schedule.notifications`)**:
+  - Multi-tiered delivery fallback: Native Windows 11 Toast (`QSystemTrayIcon.showMessage`) -> Desktop HUD Console -> Voice TTS announcement.
+  - Split-interval quiet hours evaluation supporting midnight crossing (e.g. 23:00 to 07:00) with priority bypass for HIGH and URGENT items.
+- **Deep Work Focus Sessions & Deterministic Briefing (`zoro.schedule.focus`, `zoro.schedule.briefing`)**:
+  - Active focus mode with duration tracking, notification holding, and completion alerts.
+  - Deterministic operational daily briefing synthesizing today's agenda, deadlines in the next 72 hours, overdue items, and top 3 priorities without LLM hallucination.
+- **Clock-Jump Detection & Sleep Catch-Up Sweeps (`zoro.schedule.engine`)**:
+  - Background polling loop utilizing monotonic elapsed intervals (`time.monotonic()`).
+  - Real-time comparison between wall-clock delta (`datetime.now(timezone.utc)`) and monotonic delta; triggers immediate recovery sweep on jumps > 5.0s (manual clock changes or wake from sleep/hibernation).
+  - Consolidated single-batch alert on wake to prevent notification spam.
+- **Central Tool Registry & Orchestrator Integration (`zoro.tools.builtin.schedule_tools`)**:
+  - 6 registered tools: `ScheduleEventTool`, `ListEventsTool`, `QueryAgendaTool`, `SetReminderTool`, `StartFocusSessionTool`, `ConfigureQuietHoursTool`.
+  - Natural language scheduling command handling in `ZoroOrchestrator` with automatic bridging to `memories` table under `MemoryCategory.SCHEDULE`.
+  - Proactive timetable context injection into central Orchestrator system prompt.
+- **Desktop HUD Timetable Interface (`zoro.ui.timetable_panel`)**:
+  - 5-tab PySide6 dialog: Agenda & Deadlines, Full Timetable Events, Focus Mode Manager, Quiet Hours & Settings, and Alert History.
+  - Accessible via dedicated HUD title bar button and System Tray context menu.

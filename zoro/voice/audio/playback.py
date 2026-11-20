@@ -223,7 +223,8 @@ class AudioPlaybackManager:
                     try:
                         stream.write(chunk_to_write)
                     except Exception as e:
-                        logger.error("Error writing audio chunk to speaker stream: %s", e)
+                        err_desc = e.args[0] if (hasattr(e, "args") and e.args) else type(e).__name__
+                        logger.warning("Error writing audio chunk to speaker stream: %s", err_desc)
                 else:
                     # Synthetic delay matching chunk duration
                     duration_sec = len(samples) / float(target_sr)

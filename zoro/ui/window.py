@@ -5,9 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -15,6 +17,8 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QSystemTrayIcon,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -37,6 +41,9 @@ class ZoroMainWindow(QMainWindow):
     benchmarks_received = Signal(dict)
     voice_state_received = Signal(dict)
     voice_transcription_received = Signal(dict)
+    emergency_trigger_signal = Signal()
+    schedule_alert_received = Signal(dict)
+    schedule_briefing_received = Signal(dict)
 
     def __init__(
         self,
@@ -50,9 +57,11 @@ class ZoroMainWindow(QMainWindow):
         # IPC dispatch callback set by app.py
         self.ipc_call_handler = ipc_call_handler
         self._current_approval_token: Optional[str] = None
+        self.tray_icon: Optional[Any] = None
 
         self.setWindowTitle("PROJECT ZORO // SYSTEM HUD")
-        self.resize(self.settings.ui_window_width, self.settings.ui_window_height + 150)
+        self.resize(self.settings.ui_window_width, max(750, self.settings.ui_window_height + 100))
+        self.setMinimumSize(850, 520)
 
         self._build_ui()
         self.telemetry_received.connect(self.update_telemetry)
@@ -61,18 +70,26 @@ class ZoroMainWindow(QMainWindow):
         self.approval_requested.connect(self.display_approval_request)
         self.step_update_received.connect(self.update_step_progress)
         self.providers_received.connect(self.update_providers)
+        self.emergency_trigger_signal.connect(self._on_emergency_clicked)
         self.voice_state_received.connect(self.update_voice_state)
         self.voice_transcription_received.connect(self.update_voice_transcription)
+        self.schedule_alert_received.connect(self.update_schedule_alert)
+        self.schedule_briefing_received.connect(self.update_schedule_briefing)
 
     def _build_ui(self) -> None:
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(14)
+        main_layout.setContentsMargins(16, 12, 16, 12)
+        main_layout.setSpacing(8)
 
-        # 1. Header Bar
-        header_layout = QHBoxLayout()
+        # 1. Pinned Header Bar (Always visible at top)
+        header_widget = QWidget(self)
+        header_widget.setObjectName("headerContainer")
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(4, 2, 4, 8)
+        header_layout.setSpacing(12)
+
         title_label = QLabel("PROJECT ZORO  //  PERSISTENT INTELLIGENCE", self)
         title_label.setObjectName("titleLabel")
         header_layout.addWidget(title_label)
@@ -85,12 +102,28 @@ class ZoroMainWindow(QMainWindow):
 
         self.ai_state_pill = QLabel("AI: IDLE", self)
         self.ai_state_pill.setObjectName("aiStatePill")
-        self.ai_state_pill.setStyleSheet("background-color: #1a2332; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+        self.ai_state_pill.setStyleSheet(
+            "background-color: #1a2332; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;"
+        )
         header_layout.addWidget(self.ai_state_pill)
 
-        main_layout.addLayout(header_layout)
+        main_layout.addWidget(header_widget)
 
-        # 2. Hardware Telemetry Section
+        # 2. Scrollable Middle Area
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setObjectName("mainScrollArea")
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        self.scroll_content = QWidget()
+        self.scroll_content.setObjectName("scrollContent")
+        scroll_layout = QVBoxLayout(self.scroll_content)
+        scroll_layout.setContentsMargins(4, 4, 10, 4)
+        scroll_layout.setSpacing(12)
+
+        # --- Hardware Telemetry Section ---
         telemetry_group = QGroupBox("HOST HARDWARE TELEMETRY", self)
         telemetry_layout = QVBoxLayout(telemetry_group)
         telemetry_layout.setSpacing(8)
@@ -132,9 +165,9 @@ class ZoroMainWindow(QMainWindow):
         gpu_box.addWidget(self.gpu_label)
         telemetry_layout.addLayout(gpu_box)
 
-        main_layout.addWidget(telemetry_group)
+        scroll_layout.addWidget(telemetry_group)
 
-        # 3. AI Runtime & Provider Section (Milestone 02)
+        # --- AI Runtime & Provider Section (Milestone 02) ---
         ai_runtime_group = QGroupBox("INTELLIGENCE CORE & LOCAL RUNTIME", self)
         ai_layout = QHBoxLayout(ai_runtime_group)
         ai_layout.setSpacing(12)
@@ -154,9 +187,9 @@ class ZoroMainWindow(QMainWindow):
         self.btn_benchmark.clicked.connect(self._on_benchmark_clicked)
         ai_layout.addWidget(self.btn_benchmark)
 
-        main_layout.addWidget(ai_runtime_group)
+        scroll_layout.addWidget(ai_runtime_group)
 
-        # 4. Interactive Directive Input Bar
+        # --- Interactive Directive Input Bar ---
         directive_group = QGroupBox("USER DIRECTIVE & PROMPT DISPATCH", self)
         directive_layout = QHBoxLayout(directive_group)
         self.input_prompt = QLineEdit(self)
@@ -173,9 +206,9 @@ class ZoroMainWindow(QMainWindow):
         self.btn_cancel.clicked.connect(self._on_cancel_clicked)
         directive_layout.addWidget(self.btn_cancel)
 
-        main_layout.addWidget(directive_group)
+        scroll_layout.addWidget(directive_group)
 
-        # 4b. Computer Control & Desktop Automation Panel (Milestone 03)
+        # --- Computer Control & Desktop Automation Panel (Milestone 03) ---
         computer_group = QGroupBox("COMPUTER CONTROL & EXECUTION SANDBOX", self)
         comp_layout = QHBoxLayout(computer_group)
         comp_layout.setSpacing(10)
@@ -203,9 +236,9 @@ class ZoroMainWindow(QMainWindow):
         self.btn_windows.clicked.connect(self._on_list_windows_clicked)
         comp_layout.addWidget(self.btn_windows)
 
-        main_layout.addWidget(computer_group)
+        scroll_layout.addWidget(computer_group)
 
-        # 4b. Voice Control & Audio Interaction (Milestone 04)
+        # --- Voice Control & Audio Interaction (Milestone 04) ---
         voice_group = QGroupBox("VOICE INTERACTION & AUDIO PIPELINE", self)
         voice_layout = QVBoxLayout(voice_group)
 
@@ -225,7 +258,9 @@ class ZoroMainWindow(QMainWindow):
         voice_top_row.addWidget(self.btn_stop_speaking)
 
         self.voice_state_pill = QLabel("VOICE: DISABLED", self)
-        self.voice_state_pill.setStyleSheet("background-color: #1a2332; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+        self.voice_state_pill.setStyleSheet(
+            "background-color: #1a2332; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;"
+        )
         voice_top_row.addWidget(self.voice_state_pill)
 
         voice_layout.addLayout(voice_top_row)
@@ -247,9 +282,9 @@ class ZoroMainWindow(QMainWindow):
         voice_opts_row.addWidget(self.chk_wake_hey_zoro)
 
         voice_layout.addLayout(voice_opts_row)
-        main_layout.addWidget(voice_group)
+        scroll_layout.addWidget(voice_group)
 
-        # 5. Interactive Human-in-the-Loop Approval Box (Hidden until needed)
+        # --- Interactive Human-in-the-Loop Approval Box ---
         self.approval_group = QGroupBox("SECURITY AUTHORIZATION REQUIRED", self)
         self.approval_group.setStyleSheet("QGroupBox { border: 2px solid #ffaa00; background-color: #1e1910; }")
         approval_layout = QVBoxLayout(self.approval_group)
@@ -270,30 +305,54 @@ class ZoroMainWindow(QMainWindow):
 
         approval_layout.addLayout(approval_btn_box)
         self.approval_group.hide()
-        main_layout.addWidget(self.approval_group)
+        scroll_layout.addWidget(self.approval_group)
 
-        # 6. Activity & Security Audit Feed Console
+        # --- Activity & Security Audit Feed Console ---
         feed_group = QGroupBox("ACTIVITY & SECURITY AUDIT FEED", self)
         feed_layout = QVBoxLayout(feed_group)
         self.console = QTextEdit(self)
         self.console.setReadOnly(True)
+        self.console.setMinimumHeight(160)
         feed_layout.addWidget(self.console)
-        main_layout.addWidget(feed_group)
+        scroll_layout.addWidget(feed_group)
 
-        # 7. Bottom Action Controls Bar
-        action_layout = QHBoxLayout()
+        self.scroll_area.setWidget(self.scroll_content)
+        main_layout.addWidget(self.scroll_area, 1)
+
+        # 3. Pinned Bottom Action Controls Bar (Always visible at bottom)
+        action_widget = QWidget(self)
+        action_widget.setObjectName("actionContainer")
+        action_layout = QHBoxLayout(action_widget)
+        action_layout.setContentsMargins(4, 6, 4, 2)
+        action_layout.setSpacing(10)
+
         self.btn_clear_log = QPushButton("Clear Display", self)
         self.btn_clear_log.clicked.connect(self.console.clear)
         action_layout.addWidget(self.btn_clear_log)
+
+        self.btn_memory_mgr = QPushButton("Memory Manager", self)
+        self.btn_memory_mgr.setToolTip("View and manage persistent personal memories (Milestone 05)")
+        self.btn_memory_mgr.clicked.connect(self._on_open_memory_manager_clicked)
+        action_layout.addWidget(self.btn_memory_mgr)
+
+        self.btn_timetable = QPushButton("Timetable & Schedule", self)
+        self.btn_timetable.setToolTip("View timetable, upcoming deadlines, and focus mode (Milestone 06)")
+        self.btn_timetable.clicked.connect(self._on_open_timetable_clicked)
+        action_layout.addWidget(self.btn_timetable)
 
         action_layout.addStretch()
 
         self.btn_emergency = QPushButton("EMERGENCY HARD KILL", self)
         self.btn_emergency.setObjectName("emergencyButton")
+        self.btn_emergency.setToolTip("Emergency Hard Kill (Global Shortcut: Ctrl+Alt+Shift+K)")
         self.btn_emergency.clicked.connect(self._on_emergency_clicked)
         action_layout.addWidget(self.btn_emergency)
 
-        main_layout.addLayout(action_layout)
+        # In-focus Qt shortcut fallback
+        self.shortcut_emergency = QShortcut(QKeySequence("Ctrl+Alt+Shift+K"), self)
+        self.shortcut_emergency.activated.connect(self._on_emergency_clicked)
+
+        main_layout.addWidget(action_widget)
 
     @Slot(dict)
     def update_telemetry(self, data: Dict[str, Any]) -> None:
@@ -327,11 +386,17 @@ class ZoroMainWindow(QMainWindow):
         new_state = payload.get("new_state", "IDLE")
         self.ai_state_pill.setText(f"AI: {new_state}")
         if new_state in ("WAITING_FOR_APPROVAL", "FAILED"):
-            self.ai_state_pill.setStyleSheet("background-color: #3d2010; color: #ffaa00; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+            self.ai_state_pill.setStyleSheet(
+                "background-color: #3d2010; color: #ffaa00; padding: 4px 10px; border-radius: 4px; font-weight: bold;"
+            )
         elif new_state in ("EXECUTING", "PLANNING", "UNDERSTANDING"):
-            self.ai_state_pill.setStyleSheet("background-color: #102a3d; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+            self.ai_state_pill.setStyleSheet(
+                "background-color: #102a3d; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;"
+            )
         else:
-            self.ai_state_pill.setStyleSheet("background-color: #1a2332; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+            self.ai_state_pill.setStyleSheet(
+                "background-color: #1a2332; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;"
+            )
         self.append_log(f"[AI State] Transitioned to {new_state}")
 
     @Slot(dict)
@@ -341,6 +406,8 @@ class ZoroMainWindow(QMainWindow):
         tool = payload.get("tool_name", "Tool")
         self.lbl_approval_desc.setText(f"ACTION REQUIRED: [{tool}] {desc}")
         self.approval_group.show()
+        if hasattr(self, "scroll_area"):
+            self.scroll_area.ensureWidgetVisible(self.approval_group)
         self.append_log(f"[APPROVAL] Authorization requested for {tool}: {desc}")
 
     @Slot(dict)
@@ -374,7 +441,12 @@ class ZoroMainWindow(QMainWindow):
             res = self.ipc_call_handler("ai.run_benchmark", {"provider": provider, "model": model})
             if res and "result" in res:
                 m = res["result"]
-                self.append_log(f"[Benchmark Result] TTFT: {m.get('ttft_ms')}ms | Tok/s: {m.get('tokens_per_sec')} | JSON Score: {m.get('structured_json_score')} | VRAM: {m.get('vram_used_mb')}MB")
+                self.append_log(
+                    f"[Benchmark Result] TTFT: {m.get('ttft_ms')}ms | "
+                    f"Tok/s: {m.get('tokens_per_sec')} | "
+                    f"JSON Score: {m.get('structured_json_score')} | "
+                    f"VRAM: {m.get('vram_used_mb')}MB"
+                )
 
     def _on_dispatch_clicked(self) -> None:
         prompt = self.input_prompt.text().strip()
@@ -409,6 +481,64 @@ class ZoroMainWindow(QMainWindow):
         self.append_log("[CRITICAL] EMERGENCY KILL BUTTON PRESSED BY USER.")
         self.status_pill.setText("HALTED // KILL ACTIVATED")
         self.emergency_mgr.trigger_emergency_kill("Emergency button in Desktop HUD pressed.")
+
+    def _on_open_memory_manager_clicked(self) -> None:
+        """Open the interactive Personal Memory Manager dialog."""
+        from zoro.ui.memory_panel import ZoroMemoryDialog
+        dlg = ZoroMemoryDialog(parent=self, ipc_call_handler=self.ipc_call_handler)
+        dlg.exec()
+
+    def _on_open_timetable_clicked(self) -> None:
+        """Open the interactive Timetable & Proactive Intelligence dialog."""
+        from zoro.ui.timetable_panel import ZoroTimetableDialog
+        dlg = ZoroTimetableDialog(parent=self, ipc_call_handler=self.ipc_call_handler)
+        dlg.exec()
+
+    @Slot(dict)
+    def update_schedule_alert(self, payload: Dict[str, Any]) -> None:
+        """Receive and log scheduled alerts and reminders."""
+        title = payload.get("title", "Scheduled Alert")
+        msg = payload.get("message", "")
+        pri = payload.get("priority", "MEDIUM")
+        is_silent = payload.get("is_silent", False)
+
+        self.append_log(f"⏰ [ALERT - {pri}] {title}: {msg}")
+
+        # Audible chime on Windows if not silent
+        if not is_silent:
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            except Exception:
+                pass
+
+        # Windows Native Toast via System Tray on the main GUI thread
+        if self.tray_icon:
+            try:
+                icon_type = (
+                    QSystemTrayIcon.Warning
+                    if pri in ("HIGH", "URGENT")
+                    else QSystemTrayIcon.Information
+                )
+                self.tray_icon.showMessage(title, msg or f"Reminder: {title}", icon_type, 7000)
+            except Exception as e:
+                pass
+
+    @Slot(dict)
+    def update_schedule_briefing(self, payload: Dict[str, Any]) -> None:
+        """Receive and log daily operational situational briefing."""
+        date_str = payload.get("briefing_date", "")
+        self.append_log(f"📋 [DAILY BRIEFING] Operational overview for {date_str} dispatched.")
+        if self.tray_icon:
+            try:
+                self.tray_icon.showMessage(
+                    "PROJECT ZORO Daily Briefing",
+                    f"Your situational briefing for {date_str} is ready.",
+                    QSystemTrayIcon.Information,
+                    6000,
+                )
+            except Exception:
+                pass
 
     def _on_profile_changed(self, profile_name: str) -> None:
         self.append_log(f"[Sandbox] Switching profile to {profile_name}...")
@@ -454,13 +584,21 @@ class ZoroMainWindow(QMainWindow):
             is_en = payload["is_enabled"]
             self.btn_voice_toggle.setText("Disable Voice" if is_en else "Enable Voice")
         if new_state in ("LISTENING", "DETECTED"):
-            self.voice_state_pill.setStyleSheet("background-color: #003322; color: #00ff88; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+            self.voice_state_pill.setStyleSheet(
+                "background-color: #003322; color: #00ff88; padding: 4px 10px; border-radius: 4px; font-weight: bold;"
+            )
         elif new_state in ("SPEAKING", "TRANSCRIBING", "PROCESSING"):
-            self.voice_state_pill.setStyleSheet("background-color: #102a3d; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+            self.voice_state_pill.setStyleSheet(
+                "background-color: #102a3d; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;"
+            )
         elif new_state in ("ERROR", "MUTED"):
-            self.voice_state_pill.setStyleSheet("background-color: #3d1010; color: #ff4444; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+            self.voice_state_pill.setStyleSheet(
+                "background-color: #3d1010; color: #ff4444; padding: 4px 10px; border-radius: 4px; font-weight: bold;"
+            )
         else:
-            self.voice_state_pill.setStyleSheet("background-color: #1a2332; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
+            self.voice_state_pill.setStyleSheet(
+                "background-color: #1a2332; color: #00f0ff; padding: 4px 10px; border-radius: 4px; font-weight: bold;"
+            )
         self.append_log(f"[Voice] State -> {new_state}")
 
     @Slot(dict)

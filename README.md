@@ -63,7 +63,9 @@ python -m zoro --ui
 ```
 
 ### 3. Emergency Controls
-- **Instant Kill Switch**: Double-click `scripts\emergency_kill.bat` or run:
+- **Global Keyboard Shortcut**: `Ctrl + Alt + Shift + K` (instant kernel-level termination across all Windows applications).
+- **HUD Emergency Button**: Large red kill button in the desktop HUD header.
+- **Batch / Script Kill Switch**: Double-click `scripts\emergency_kill.bat` or run:
   ```powershell
   python scripts/emergency_kill.py --kill
   ```
@@ -89,12 +91,16 @@ d:\downloads\PROJECTS\ZORO\
 │   ├── config/       # Pydantic v2 settings & OS path resolution
 │   ├── ipc/          # Windows Named Pipe protocol, server, and client
 │   ├── storage/      # SQLite WAL manager, models, migration runner, SQL scripts
-│   ├── security/     # Windows Job Object, permissions, DACL halt gate, audit logging
+│   ├── security/     # Windows Job Object, permissions, DACL halt gate, audit logging, emergency hotkey
 │   ├── models/       # Local AI model abstraction layer (Ollama / llama-server)
-│   └── ui/           # PySide6 desktop HUD, system tray, and dark theme
-├── scripts/          # Supervisor, emergency kill switch, and launch scripts
+│   ├── computer/     # Windows computer control (UI automation, keyboard/mouse, OCR, screen capture)
+│   ├── voice/        # High-speed local voice subsystem (VAD, wake word, STT, TTS)
+│   ├── memory/       # Persistent personal memory, semantic vector indexing, hybrid search
+│   ├── schedule/     # Proactive intelligence, timetable awareness, deadline tracking, notifications
+│   └── ui/           # PySide6 desktop HUD, system tray, dark theme, memory & timetable panels
+├── scripts/          # Supervisor, emergency kill switch, benchmarks, and launch scripts
 ├── benchmarks/       # Empirical model & hardware benchmarking harness
-├── tests/            # Pytest automated test suite
+├── tests/            # Pytest automated test suite (326+ passing tests)
 └── docs/             # Technical architecture and design specifications
 ```
 
@@ -103,13 +109,13 @@ d:\downloads\PROJECTS\ZORO\
 ## Roadmap Overview
 
 - **Milestone 0**: Research, Hardware Benchmarks & Systems Architecture *(Completed)*
-- **Milestone 1**: Core Foundation, IPC, OS Boundaries & Desktop Shell *(In Progress)*
-- **Milestone 2**: Local AI Model Engine & Central Orchestration
-- **Milestone 3**: Windows Computer Control (UI Automation, Shell, Filesystem)
-- **Milestone 4**: High-Speed Local Voice Interaction (openWakeWord, Whisper, Piper)
-- **Milestone 5**: Persistent Long-Term Memory & Vector Indexing
-- **Milestone 6**: Proactive Intelligence & Timetable Awareness
-- **Milestone 7**: Autonomous Multi-Agent Swarms & Self-Verification
+- **Milestone 1**: Core Foundation, IPC, OS Boundaries & Desktop Shell *(Completed)*
+- **Milestone 2**: Local AI Model Engine & Central Orchestration *(Completed)*
+- **Milestone 3**: Windows Computer Control (UI Automation, Shell, Filesystem) *(Completed)*
+- **Milestone 4**: High-Speed Local Voice Interaction (openWakeWord, Whisper, Piper) *(Completed)*
+- **Milestone 5**: Persistent Personal Memory Architecture & Semantic Vector Indexing *(Completed)*
+- **Milestone 6**: Proactive Intelligence & Timetable Awareness *(Completed)*
+- **Milestone 7**: Autonomous Multi-Agent Swarms & Self-Verification *(Next)*
 - **Milestone 8**: Secure Mobile Companion Integration
 
 For detailed documentation, refer to [ARCHITECTURE.md](ARCHITECTURE.md), [SECURITY.md](SECURITY.md), and [ROADMAP.md](ROADMAP.md).

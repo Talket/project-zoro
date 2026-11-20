@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from zoro.config.settings import ZoroSettings, get_settings
 from zoro.ipc.pipe_client import NamedPipeClient
+from zoro.security.emergency_hotkey import EmergencyHotkeyListener
 from zoro.ui.theme import HUD_STYLESHEET
 from zoro.ui.window import ZoroMainWindow
 
@@ -40,6 +41,8 @@ class IpcWorkerThread(threading.Thread):
         self.client.register_notification_handler("voice.state_changed", self._on_voice_state)
         self.client.register_notification_handler("voice.transcription", self._on_voice_transcription)
         self.client.register_notification_handler("voice.interrupted", self._on_voice_interrupted)
+        self.client.register_notification_handler("schedule.alert", self._on_schedule_alert)
+        self.client.register_notification_handler("schedule.briefing", self._on_schedule_briefing)
 
         backoff = 1.0
         while self._is_running:
@@ -95,6 +98,14 @@ class IpcWorkerThread(threading.Thread):
         """Forward barge-in notification to Qt GUI thread."""
         self.window.log_message_received.emit("[Voice] Speech playback interrupted (barge-in).")
 
+    def _on_schedule_alert(self, method: str, data: Dict[str, Any]) -> None:
+        """Forward reminder alert to Qt GUI thread."""
+        self.window.schedule_alert_received.emit(data)
+
+    def _on_schedule_briefing(self, method: str, data: Dict[str, Any]) -> None:
+        """Forward daily briefing to Qt GUI thread."""
+        self.window.schedule_briefing_received.emit(data)
+
     def stop(self) -> None:
         self._is_running = False
         self._stop_event.set()
@@ -126,7 +137,29 @@ class ZoroDesktopApp:
         self.window = ZoroMainWindow(settings=self.settings)
         self.ipc_worker = IpcWorkerThread(self.window, self.settings)
 
+        # Global system-wide emergency hotkey listener (Ctrl+Alt+Shift+K)
+        self.hotkey_listener = EmergencyHotkeyListener(on_trigger=self._on_emergency_hotkey)
+        hotkey_ok = self.hotkey_listener.start()
+        if not hotkey_ok:
+            logger.warning(
+                "Global emergency shortcut Ctrl+Alt+Shift+K could not be registered: %s",
+                self.hotkey_listener.registration_error,
+            )
+        else:
+            logger.info("Global emergency shortcut Ctrl+Alt+Shift+K active across all Windows applications.")
+
         self._setup_system_tray()
+
+    def _on_emergency_hotkey(self) -> None:
+        """Invoked when global Ctrl+Alt+Shift+K is intercepted by Windows OS."""
+        logger.critical("GLOBAL EMERGENCY HOTKEY Ctrl+Alt+Shift+K TRIGGERED BY USER!")
+        try:
+            self.window.emergency_trigger_signal.emit()
+        except Exception as e:
+            logger.warning("Failed to emit emergency_trigger_signal: %s", e)
+
+        from zoro.security.emergency import EmergencyManager
+        EmergencyManager().trigger_emergency_kill("Global keyboard shortcut Ctrl+Alt+Shift+K pressed.")
 
     def _setup_system_tray(self) -> None:
         """Create and configure Windows System Tray icon."""
@@ -143,12 +176,21 @@ class ZoroDesktopApp:
         painter.end()
 
         self.tray_icon = QSystemTrayIcon(QIcon(pixmap), self.app)
+        self.window.tray_icon = self.tray_icon
 
         # Context Menu
         menu = QMenu()
         action_show = QAction("Show HUD", menu)
         action_show.triggered.connect(self._toggle_window)
         menu.addAction(action_show)
+
+        action_memory = QAction("Personal Memory Manager", menu)
+        action_memory.triggered.connect(self.window._on_open_memory_manager_clicked)
+        menu.addAction(action_memory)
+
+        action_timetable = QAction("Timetable & Deadlines", menu)
+        action_timetable.triggered.connect(self.window._on_open_timetable_clicked)
+        menu.addAction(action_timetable)
 
         action_emergency = QAction("EMERGENCY HARD KILL", menu)
         action_emergency.triggered.connect(self.window._on_emergency_clicked)
@@ -196,11 +238,15 @@ class ZoroDesktopApp:
             self.window.raise_()
             self.window.activateWindow()
 
-        ret = self.app.exec()
-        self.ipc_worker.stop()
+        try:
+            ret = self.app.exec()
+        finally:
+            self.hotkey_listener.stop()
+            self.ipc_worker.stop()
         return ret
 
     def exit_app(self) -> None:
         """Cleanly exit UI application."""
+        self.hotkey_listener.stop()
         self.ipc_worker.stop()
         self.app.quit()
